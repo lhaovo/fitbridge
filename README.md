@@ -30,8 +30,9 @@ FitBridge 是一个**自托管优先**的多平台运动数据同步服务。它
 
 **M0 编码阶段**。方案已定稿，见 [决策记录](docs/06-decisions.md)；进度见 [M0 进度](docs/07-m0-progress.md)。
 
-已锁定的决策：单用户设计 / 纯自托管（Docker Compose）/ 首批平台 = 迈金·OTM + MyWhoosh /
-FIT 路线用 `fit-file-parser` 走简单实现 / 参考项目只复用可复用逻辑。
+已锁定的决策：单用户设计 / 纯自托管单体 / 首批平台 = 迈金·OTM + MyWhoosh /
+FIT 路线用 `fit-file-parser` 走简单实现 / 参考项目只复用可复用逻辑 /
+**SQLite + 本地文件，不用 Postgres / Redis / MinIO / Docker**。
 
 ```
 M0  骨架 + fitkit(只读解析) + 迈金OTM + MyWhoosh + 本地统一运动库
@@ -52,8 +53,23 @@ M0  骨架 + fitkit(只读解析) + 迈金OTM + MyWhoosh + 本地统一运动库
 | 迈金 OTM 适配器（登录/列表/详情/下载/上传 `jilu0`） | OK 8 回归测试（待真实账号验证） |
 | MyWhoosh 适配器（登录/列表/下载） | OK 5 回归测试（待真实账号验证） |
 | Postgres schema（11 表）+ 迁移器 | OK 实测通过 |
-| 单用户认证 + 凭证信封加密（AES-256-GCM） | OK 实测通过，39/39 测试绿 |
-| 同步引擎编排 / 对象存储 / Web 前端 | 待做 |
+| 单用户认证 + 凭证信封加密（AES-256-GCM） | OK 实测通过，48/48 测试绿 |
+| SQLite（Node 内置 node:sqlite）+ 本地 blob 存储 | OK 实测通过 |
+| Web 控制台 v1（登录 / 平台矩阵 / 连接账号） | OK 已可访问 |
+| 同步引擎编排（活动库填充） | 待做 |
+
+## 快速启动
+
+```bash
+pnpm install
+pnpm build
+pnpm start          # → http://127.0.0.1:8080
+```
+
+首次启动会自动：生成 `data/` 目录、创建 SQLite 库并跑迁移、生成管理员密码并打印到日志
+（若未设置 `FITBRIDGE_PASSWORD`）。重置密码：`pnpm run reset-password`。
+
+**整个 FitBridge 的状态 = `data/` 目录**，备份它即可：`./scripts/backup.sh`。
 
 ## 参考项目
 

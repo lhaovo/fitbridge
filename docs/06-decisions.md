@@ -13,6 +13,7 @@
 | **D3** | **纯自托管部署** | 只提供 Docker Compose 形态，不做官方托管 SaaS，不做桌面 Agent 分发。数据、凭证、文件全部在用户自己的机器上。 |
 | **D4** | **首批平台 = 迈金/顽鹿OTM + MyWhoosh** | 两者都是下载源；迈金同时具备上传能力 → M0 可打通「MyWhoosh → 迈金」的真实纵向切片。Strava / Intervals.icu 等推到 M2。 |
 | **D5** | **FIT 路线从简单的来** | 基于 `fit-file-parser`（MIT，v6.2.7，活跃维护）做 **只读解析**；GPX→FIT 构建、FIT 修复、设备伪装等全部推迟。接口先留桩。 |
+| **D6** | **单体 + SQLite + 本地文件，不用 Docker** | 去掉 Postgres / Redis / MinIO 三个外部服务：数据库用 Node 内置的 `node:sqlite`；队列暂用进程内；文件存本地磁盘（内容寻址）；整个 FitBridge 状态 = 一个数据目录。`FileStore` 接口留好，将来要 S3/多用户再换实现。 |
 
 ### D2 的具体简化
 
@@ -250,3 +251,50 @@ fitkit 对外只暴露 `readFit()` 契约，内部实现可替换，解析器切
 | 无限期保留文件 | — | 磁盘风险 |
 | 第一版就做 Strava | D4 | 需用户自填 client_id，门槛高；M2 再做 |
 
+
+
+---
+
+## 六、D6 详解：单体 + SQLite + 本地文件
+
+### 为什么砍掉三个外部服务
+
+| 原方案 | 现状 | 理由 |
+|--------|------|------|
+| PostgreSQL | **SQLite**（`node:sqlite`，Node 内置） | 单用户场景引入独立数据库服务没有收益；SQLite 单文件、零安装、事务/唯一约束/JSON1 都有 |
+| Redis + BullMQ | 进程内队列（M0 先不用） | 队列的唯一用途是跑同步任务，单进程不需要；真需要时再引入 |
+| MinIO / S3 | **本地文件系统**（内容寻址） | FIT 文件是二进制大对象不适合进 DB，但单用户自托管用本地磁盘完全够；要远程/多用户再换 S3 实现 |
+
+**结果**：从「5 个容器」降到「1 个进程 + 1 个目录」。
+
+### 数据目录布局
+
+```
+data/
+├── fitbridge.db      SQLite（业务数据 + 凭证密文）WAL 模式
+├── fitbridge.db-wal
+├── fitbridge.db-shm
+├── blobs/            FIT/GPX 原文件（内容寻址 sha256/ab/cd/<hash>）
+└── master.key        凭证加密主密钥（0600，自动生成）
+```
+
+**备份 = 打包这个目录**（`scripts/backup.sh`）。
+主密钥丢了，已保存的平台凭证就解不开 —— 所以备份时别漏它。
+
+### SQLite 方言差异（已在 db.ts 层消化）
+
+| Postgres | SQLite | 处理方式 |
+|----------|--------|---------|
+| `gen_random_uuid()` | 无 | 应用层 `randomUUID()` |
+| `JSONB` | `TEXT` + `json_valid()` 约束 | 存 JSON 字符串 |
+| `TEXT[]` | `TEXT`（JSON 数组） | 同上 |
+| `TIMESTAMPTZ` | `TEXT`（ISO-8601 UTC） | 应用层统一格式 |
+| `BYTEA` | `BLOB` | 直接对应 |
+| `RETURNING id` | `lastInsertRowid` | `db.run()` 返回值 |
+
+上层接口（`query` / `one` / `run` / `transaction`）保持不变，将来换 Postgres 只改 `lib/db.ts` 一个文件。
+
+### 运行时要求
+
+`node:sqlite` 需要 **Node >= 22.5**（本项目已在 `engines` 声明）。
+打包器/测试运行器可能还不认识它是内置模块，因此 `db.ts` 用 `createRequire` 动态加载。

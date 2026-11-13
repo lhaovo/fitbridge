@@ -1,9 +1,15 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
+import fastifyStatic from '@fastify/static';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { AppConfig } from './config.js';
 import { Database } from './lib/db.js';
+import type { FileStore } from '@fitbridge/core';
 import { listManifests, getAdapter } from './lib/platforms.js';
-import { safeEqual, signToken, verifyToken } from './lib/crypto.js';
+import { signToken, verifyToken } from './lib/crypto.js';
+import { checkLogin } from './lib/bootstrap.js';
+import { randomUUID } from 'node:crypto';
 import { DEFAULT_USER_ID } from './lib/constants.js';
 
 /**
@@ -17,6 +23,7 @@ import { DEFAULT_USER_ID } from './lib/constants.js';
 export interface AppDeps {
   config: AppConfig;
   db: Database;
+  fileStore?: FileStore;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -42,6 +49,14 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     hook: 'onRequest',
   });
 
+  // Web 控制台（静态资源）
+  const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
+  await app.register(fastifyStatic, {
+    root: publicDir,
+    index: ['index.html'],
+    prefix: '/',
+  });
+
   const SESSION_COOKIE = 'fb_session';
 
   /** 会话有效性与鉴权 */
@@ -55,9 +70,10 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   }
 
   app.addHook('onRequest', async (req, reply) => {
-    // 健康检查与平台列表不需要登录（平台列表是公开的能力矩阵）
+    // 静态资源（登录页本身）与健康检查放行
+    if (!req.url.startsWith('/api/')) return;
+    // 平台能力矩阵与认证接口是公开的
     if (
-      req.url === '/health' ||
       req.url.startsWith('/api/v1/platforms') ||
       req.url.startsWith('/api/v1/auth/')
     ) {
@@ -78,6 +94,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     status: 'ok',
     version: '0.1.0',
     db: db.isAvailable,
+    dbFile: db.filePath,
+    fileStore: deps.fileStore?.kind ?? 'none',
     platforms: listManifests().length,
   }));
 
@@ -105,7 +123,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
 
   app.post('/api/v1/auth/login', async (req, reply) => {
     const body = (req.body ?? {}) as { password?: string };
-    if (!body.password || !safeEqual(body.password, config.adminPassword)) {
+    if (!body.password || !checkLogin(db, body.password)) {
       return reply.code(401).send({
         error: { code: 'AUTH_EXPIRED', message: '密码错误' },
       });
@@ -144,7 +162,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const rows = await db.query(
       `SELECT id, platform_id, label, status, last_validated_at, expires_at, created_at
          FROM credentials
-        WHERE user_id = $1
+        WHERE user_id = ?
         ORDER BY created_at DESC`,
       [DEFAULT_USER_ID],
     );
@@ -228,9 +246,10 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       `INSERT INTO credentials
          (id, user_id, platform_id, label, auth_type, secret_cipher, secret_iv,
           secret_tag, key_version, meta, status)
-       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, 'active')
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
        RETURNING id`,
       [
+        randomUUID(),
         DEFAULT_USER_ID,
         platformId,
         body.label ?? null,
@@ -259,7 +278,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         .send({ error: { code: 'INTERNAL', message: '数据库不可用' } });
     }
     await db.query(
-      'DELETE FROM credentials WHERE id = $1 AND user_id = $2',
+      'DELETE FROM credentials WHERE id = ? AND user_id = ?',
       [id, DEFAULT_USER_ID],
     );
     return { ok: true };

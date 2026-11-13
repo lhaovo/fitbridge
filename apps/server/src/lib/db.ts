@@ -1,32 +1,54 @@
-import { Pool, type PoolClient, type QueryResultRow } from 'pg';
+import { createRequire } from 'node:module';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import type { DatabaseSync as DatabaseSyncInstance } from 'node:sqlite';
 
 /**
- * Postgres 访问层。
+ * node:sqlite 用 createRequire 动态加载。
  *
- * M0 阶段刻意保持简单：连接池 + query 助手 + 一个迁移脚本。
- * 后续如果上多用户，再补 RLS。
+ * 原因：它是较新的 Node 内置模块（Node >= 22.5），部分打包器 / 测试运行器
+ * 还不知道它是内置模块，静态 import 会被当成普通依赖去解析而失败。
+ */
+const nodeRequire = createRequire(import.meta.url);
+const { DatabaseSync } = nodeRequire('node:sqlite') as {
+  DatabaseSync: new (path: string) => DatabaseSyncInstance;
+};
+
+/**
+ * SQLite 数据层。
+ *
+ * 为什么用 SQLite（而不是 Postgres / MinIO）：
+ * - 决策 D2/D3：单用户 + 纯自托管 → 不需要独立数据库服务
+ * - node:sqlite 是 Node 内置模块（SQLite 3.53+），零原生依赖、零安装成本
+ * - 单文件部署：整个 FitBridge 状态就是一个 data/fitbridge.db
+ *
+ * 与 Postgres 的差异已在本层消化：上层仍然用 query/one/run 这套接口。
+ * 将来要换 Postgres，只需替换本文件。
  */
 export class Database {
-  private pool: Pool | null = null;
+  private db: DatabaseSyncInstance | null = null;
   private available = false;
+  private readonly path: string;
 
-  constructor(private readonly connectionString: string) {}
+  constructor(path: string) {
+    this.path = path;
+  }
 
-  /** 尝试连接；失败不抛错，服务以降级模式启动（/health 会报告 db=false） */
+  /** 打开数据库；失败则以降级模式启动 */
   async connect(): Promise<boolean> {
     try {
-      this.pool = new Pool({
-        connectionString: this.connectionString,
-        max: 10,
-        connectionTimeoutMillis: 5000,
-      });
-      await this.pool.query('SELECT 1');
+      mkdirSync(dirname(this.path), { recursive: true });
+      this.db = new DatabaseSync(this.path);
+      // WAL：读写并发更好，且崩溃安全
+      this.db.exec('PRAGMA journal_mode = WAL;');
+      this.db.exec('PRAGMA foreign_keys = ON;');
+      this.db.exec('PRAGMA busy_timeout = 5000;');
       this.available = true;
       return true;
     } catch (err) {
       this.available = false;
-      this.pool = null;
-      console.error('[db] 连接失败，服务以降级模式启动:', err);
+      this.db = null;
+      console.error('[db] 打开数据库失败，服务以降级模式启动:', err);
       return false;
     }
   }
@@ -35,31 +57,67 @@ export class Database {
     return this.available;
   }
 
-  async query<T extends QueryResultRow = QueryResultRow>(
-    text: string,
-    params: unknown[] = [],
-  ): Promise<T[]> {
-    if (!this.pool) throw new Error('数据库未连接');
-    const res = await this.pool.query<T>(text, params as never[]);
-    return res.rows;
+  get filePath(): string {
+    return this.path;
   }
 
-  async one<T extends QueryResultRow = QueryResultRow>(
-    text: string,
+  /** 查询多行 */
+  query<T = Record<string, unknown>>(
+    sql: string,
     params: unknown[] = [],
-  ): Promise<T | undefined> {
-    const rows = await this.query<T>(text, params);
-    return rows[0];
+  ): T[] {
+    if (!this.db) throw new Error('数据库未连接');
+    const stmt = this.db.prepare(sql);
+    return stmt.all(...(params as never[])) as T[];
+  }
+
+  /** 查询单行 */
+  one<T = Record<string, unknown>>(
+    sql: string,
+    params: unknown[] = [],
+  ): T | undefined {
+    if (!this.db) throw new Error('数据库未连接');
+    const stmt = this.db.prepare(sql);
+    return stmt.get(...(params as never[])) as T | undefined;
+  }
+
+  /** 执行写入 */
+  run(
+    sql: string,
+    params: unknown[] = [],
+  ): { changes: number; lastInsertRowid: number } {
+    if (!this.db) throw new Error('数据库未连接');
+    const stmt = this.db.prepare(sql);
+    const r = stmt.run(...(params as never[]));
+    return {
+      changes: Number(r.changes),
+      lastInsertRowid: Number(r.lastInsertRowid),
+    };
+  }
+
+  /** 执行多条 DDL */
+  exec(sql: string): void {
+    if (!this.db) throw new Error('数据库未连接');
+    this.db.exec(sql);
+  }
+
+  /** 事务包装 */
+  transaction<T>(fn: () => T): T {
+    if (!this.db) throw new Error('数据库未连接');
+    this.db.exec('BEGIN');
+    try {
+      const result = fn();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   async close(): Promise<void> {
-    await this.pool?.end();
-    this.pool = null;
-  }
-
-  /** 供迁移脚本使用 */
-  raw(): Pool {
-    if (!this.pool) throw new Error('数据库未连接');
-    return this.pool;
+    this.db?.close();
+    this.db = null;
+    this.available = false;
   }
 }

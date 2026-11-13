@@ -58,6 +58,24 @@ export function hashPassword(password: string, salt: string): string {
   return scryptSync(password, salt, 64).toString('hex');
 }
 
+/**
+ * 生成口令记录：salt:hash
+ * 存进 DB，重启后仍能校验；改密码只需换这一条记录。
+ */
+export function makePasswordRecord(password: string): string {
+  const salt = randomBytes(16).toString('base64url');
+  return salt + ':' + hashPassword(password, salt);
+}
+
+/** 校验口令 */
+export function verifyPassword(password: string, record: string): boolean {
+  const idx = record.indexOf(':');
+  if (idx <= 0) return false;
+  const salt = record.slice(0, idx);
+  const expected = record.slice(idx + 1);
+  return safeEqual(hashPassword(password, salt), expected);
+}
+
 /** 恒定时间比较 */
 export function safeEqual(a: string, b: string): boolean {
   const ab = Buffer.from(a);

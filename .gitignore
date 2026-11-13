@@ -9,3 +9,6 @@ build/
 coverage/
 .turbo/
 *.tsbuildinfo
+
+# 运行期数据（SQLite / blob / 主密钥）
+data/

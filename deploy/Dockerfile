@@ -1,11 +1,11 @@
 # ── 构建阶段 ──────────────────────────────────────────────
 FROM node:22-alpine AS builder
 
+# node:sqlite 需要 Node >= 22.5
 RUN corepack enable && corepack prepare pnpm@12.18.0 --activate
 
 WORKDIR /app
 
-# 先拷依赖清单，利用镜像层缓存
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc tsconfig.base.json ./
 COPY packages/fitkit/package.json      packages/fitkit/
 COPY packages/core/package.json        packages/core/
@@ -16,16 +16,16 @@ COPY apps/server/package.json          apps/server/
 RUN pnpm install --frozen-lockfile
 
 COPY . .
-
 RUN pnpm build
 
 # ── 运行阶段 ──────────────────────────────────────────────
 FROM node:22-alpine AS runtime
 
-RUN apk add --no-cache tini
+RUN apk add --no-cache tini && mkdir -p /data && chown node:node /data
 
 WORKDIR /app
 ENV NODE_ENV=production
+ENV FITBRIDGE_DATA_DIR=/data
 
 COPY --from=builder /app/node_modules      ./node_modules
 COPY --from=builder /app/package.json      ./package.json
@@ -41,6 +41,7 @@ COPY --from=builder /app/packages/adapters/otm/dist       ./packages/adapters/ot
 COPY --from=builder /app/packages/adapters/mywhoosh/dist  ./packages/adapters/mywhoosh/dist
 COPY --from=builder /app/apps/server/dist          ./apps/server/dist
 COPY --from=builder /app/apps/server/migrations    ./apps/server/migrations
+COPY --from=builder /app/apps/server/public         ./apps/server/public
 
 EXPOSE 8080
 USER node

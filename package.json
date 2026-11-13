@@ -5,13 +5,16 @@
   "type": "module",
   "packageManager": "pnpm@12.18.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5"
   },
   "scripts": {
     "build": "tsc -b packages/fitkit packages/core packages/adapters/otm packages/adapters/mywhoosh apps/server",
     "clean": "tsc -b --clean",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "start": "node apps/server/dist/index.js",
+    "migrate": "node apps/server/dist/migrate.js",
+    "backup": "./scripts/backup.sh"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

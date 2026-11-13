@@ -1,0 +1,91 @@
+# FitBridge —— 纯自托管（决策 D3）
+#
+#   cp .env.example .env && docker compose up -d
+#
+# 默认只监听 127.0.0.1:8080，对外暴露请用自己的反向代理。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fitbridge
+      POSTGRES_PASSWORD: fitbridge
+      POSTGRES_DB: fitbridge
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # 只绑定本机，方便用 pgAdmin / psql 直连；不对外网暴露
+    ports:
+      - '127.0.0.1:5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U fitbridge']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--save', '60', '1', '--appendonly', 'no']
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ['server', '/data', '--console-address', ':9001']
+    environment:
+      MINIO_ROOT_USER: fitbridge
+      MINIO_ROOT_PASSWORD: fitbridge-secret
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    command: ['node', 'dist/migrate.js']
+    environment:
+      FITBRIDGE_DATABASE_URL: postgres://fitbridge:fitbridge@postgres:5432/fitbridge
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  server:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    command: ['node', 'apps/server/dist/index.js']
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      FITBRIDGE_DATABASE_URL: postgres://fitbridge:fitbridge@postgres:5432/fitbridge
+      FITBRIDGE_REDIS_URL: redis://redis:6379
+      FITBRIDGE_S3_ENDPOINT: http://minio:9000
+    ports:
+      - '127.0.0.1:8080:8080'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

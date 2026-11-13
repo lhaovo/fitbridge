@@ -23,24 +23,48 @@ FitBridge 是一个**自托管优先**的多平台运动数据同步服务。它
 | [docs/03-adapters.md](docs/03-adapters.md) | 平台适配器接口契约 + 首批平台接口规格（迈金 / MyWhoosh / Strava） |
 | [docs/04-data-model-api.md](docs/04-data-model-api.md) | 数据模型、数据库设计、REST API、任务编排语义 |
 | [docs/05-roadmap-risks.md](docs/05-roadmap-risks.md) | 里程碑路线图、风险登记表、待决策问题 |
+| [docs/06-decisions.md](docs/06-decisions.md) | **最终决策记录 + 本地存储策略 + M0 范围（优先级最高）** |
+| [docs/07-m0-progress.md](docs/07-m0-progress.md) | M0 进度、实测结论、本地开发指南 |
 
 ## 状态
 
-当前处于 **M0 设计阶段**：调研与方案已完成，尚未开始编码。
+**M0 编码阶段**。方案已定稿，见 [决策记录](docs/06-decisions.md)；进度见 [M0 进度](docs/07-m0-progress.md)。
+
+已锁定的决策：单用户设计 / 纯自托管（Docker Compose）/ 首批平台 = 迈金·OTM + MyWhoosh /
+FIT 路线用 `fit-file-parser` 走简单实现 / 参考项目只复用可复用逻辑。
 
 ```
-M0 骨架 + 迈金/OTM + MyWhoosh + Strava 三平台打通
-  → M1 任务编排 / 去重 / 日志 / Web 控制台
-    → M2 Webhook 实时化 + 增量游标
-      → M3 扩展平台（iGPSPORT / 行者 / Outbase / Garmin / Intervals.icu …）
+M0  骨架 + fitkit(只读解析) + 迈金OTM + MyWhoosh + 本地统一运动库
+    → M1  增量游标 / 去重 / FIT 修复 / GPX→FIT 构建 / 可视化
+      → M2  Strava·Intervals.icu 等官方平台 + Webhook + Web 兜底
+        → M3  更多平台 + 插件化开放
 ```
+
+**M0 的验收场景**：在 Web 控制台里连接迈金与 MyWhoosh，把两个平台的运动记录汇成一个统一运动库，
+并完成一次 **MyWhoosh → 迈金/OTM** 的真实上传同步。
+
+### 当前已跑通
+
+| 能力 | 状态 |
+|------|------|
+| FIT 只读解析（时间/距离/轨迹/心率/功率/踏频/时区） | OK 14 单测 |
+| GCJ-02 <-> WGS-84 转换（迭代反算，cm 级精度） | OK |
+| 迈金 OTM 适配器（登录/列表/详情/下载/上传 `jilu0`） | OK 8 回归测试（待真实账号验证） |
+| MyWhoosh 适配器（登录/列表/下载） | OK 5 回归测试（待真实账号验证） |
+| Postgres schema（11 表）+ 迁移器 | OK 实测通过 |
+| 单用户认证 + 凭证信封加密（AES-256-GCM） | OK 实测通过，39/39 测试绿 |
+| 同步引擎编排 / 对象存储 / Web 前端 | 待做 |
 
 ## 参考项目
 
-本项目的平台接口实现大量借鉴了社区项目
+本项目的平台接口协议大量借鉴了社区项目
 [Anathleticbicyclist/sports-data-sync-multiplatform](https://github.com/Anathleticbicyclist/sports-data-sync-multiplatform)（MIT），
 该参考项目是一个 **Android App**，其 API 适配层是本项目的主要信息来源。详见
 [调研报告](docs/01-research.md#二参考项目逆向分析)。
+
+**复用原则（决策 D1）**：只复用**可复用的逻辑**——平台接口协议细节、GCJ-02 转换算法、CRC 算法、
+去重键设计、OAuth2 模板思路。**不复用**其 Android UI / WebView / WorkManager / SharedPreferences /
+硬编码时区档位。参考项目代码仅作**算法与协议参考**，不 fork、不逐行移植。
 
 ## 免责声明
 

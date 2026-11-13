@@ -114,9 +114,19 @@
 
 ---
 
-## 四、需要用户决策的问题
+## 四、待决策问题 —— **已于 2026-11-13 全部定稿**
 
-> 这些问题会实质影响 M0 的实现方向，建议在开工前确认。
+> 决策结果见 [06-decisions.md](06-decisions.md)。以下保留原始问题与最终答案，便于追溯。
+
+| 问题 | 决策 | 详见 |
+|------|------|------|
+| Q1 部署形态 | **D3 纯自托管**（Docker Compose），不做 SaaS、不做桌面 Agent | 06 §一 |
+| Q2 首批平台 | **D4 迈金/OTM + MyWhoosh**（Strava 等推到 M2） | 06 §三 |
+| Q3 是否接受逆向接口 | **接受**，UI 明确标注「非官方接口」 | 06 §一 |
+| Q4 多用户 | **D2 单用户**（保留 `user_id` 字段，M2 再放开） | 06 §一 |
+| Q5 Strava 凭证 | M2 再决策（届时默认用户自填 client_id/secret） | — |
+| Q6 FIT 路线 | **D5 简单路线**：`fit-file-parser` 只读解析，复杂能力推迟 | 06 §四 |
+| Q7 是否全量本地存储 | **分层存储**：元数据全量常驻 / 文件用到才存 + 90 天 TTL / 派生文件 7 天缓存 | 06 §二 |
 
 ### Q1：部署形态优先级
 
@@ -166,20 +176,21 @@
 
 ---
 
-## 五、立即可执行的下一步
-
-如果方向确认，M0 的开工顺序建议：
+## 五、立即可执行的下一步（M0 开工顺序，已收敛）
 
 ```
-1. 初始化 monorepo + Docker Compose + CI（骨架）
-2. packages/fitkit（FIT 解析/CRC/GCJ-02）—— 配合真实样本文件
-3. packages/core 契约 + 领域模型 + Postgres schema
-4. apps/server 骨架 + 凭证加密 + 认证
+1. monorepo 骨架 + Docker Compose（server/worker/postgres/redis/minio）
+2. packages/fitkit —— 只做 readFit()，基于 fit-file-parser，含真实样本回归
+3. packages/core 契约 + 领域模型 + Postgres schema（三层存储落地）
+4. apps/server 骨架 + 单用户认证 + 凭证信封加密
 5. adapters/otm（首个完整适配器，验证架构可行性）
-6. 同步引擎 v1 + BullMQ
-7. apps/web 连接账号页 + 任务页
-8. adapters/{mywhoosh,strava}
+6. adapters/mywhoosh
+7. 同步引擎 v1（下载路径优先）+ BullMQ
+8. apps/web：连接账号页 + 活动库 + 手动同步 + SSE 日志
+9. 导出全部 + 备份脚本 + 部署文档
 ```
 
-其中第 2 步和第 5 步是**最高风险**（FIT 解析深度、逆向接口细节），应最先启动并尽早验证。
+第 2 步与第 5 步是**最高风险项**（FIT 解析深度、逆向接口细节），最优先启动并尽早用真实账号验证。
+
+M0 收敛版验收场景：**MyWhoosh → 迈金/OTM 真实上传成功，且两个平台的运动记录在本地统一运动库中可浏览。**
 

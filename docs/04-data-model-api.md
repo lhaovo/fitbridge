@@ -2,6 +2,27 @@
 
 ---
 
+## 零、存储分层（决策 D2/D3 落地）
+
+> 详细论证见 [06-decisions.md](06-decisions.md#二核心问题有没有必要把所有数据本地存一份)。
+
+| 层 | 内容 | 位置 | 生命周期 |
+|----|------|------|---------|
+| L1 元数据 | 活动账本、指标、任务、运行、事件、凭证密文 | Postgres | 永久（用户可手动清理） |
+| L2 原始文件 | 下载下来的 FIT / GPX 原文 | 对象存储（内容寻址） | 默认 **90 天**，可配置；到期删 blob 留元数据 |
+| L3 派生文件 | GCJ-02→WGS-84 转换结果、GPX→FIT 转换结果 | 对象存储派生区 | **7 天 TTL**，按需重建 |
+
+```sql
+-- 文件生命周期策略：定时任务扫描，超期删 blob、保留 activity_files 行并标记
+ALTER TABLE activity_files ADD COLUMN expired_at TIMESTAMPTZ;
+ALTER TABLE activity_files ADD COLUMN derived     BOOLEAN NOT NULL DEFAULT FALSE;
+-- derived=false 且 expired_at < now()  → blob 已清理，元数据仍在
+```
+
+**不做**：平台全量镜像（消耗限流配额）、云端备份、无限期保留文件。
+
+---
+
 ## 一、领域模型
 
 ### 1.1 统一活动模型（核心）
@@ -280,15 +301,18 @@ CREATE POLICY user_isolation ON activities
 
 Base：`/api/v1`
 
-### 3.1 认证
+### 3.1 认证（单用户简化版）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/auth/register` | 注册 |
-| POST | `/auth/login` | 登录，返回 HttpOnly Cookie（access + refresh） |
+| POST | `/auth/login` | 单管理员登录，返回 HttpOnly Cookie（session） |
 | POST | `/auth/logout` | |
 | GET | `/auth/me` | 当前用户 + 设置 |
 | PATCH | `/auth/me` | 修改时区/坐标策略/通知偏好 |
+| GET | `/auth/bootstrap-state` | 是否已初始化（前端据此决定显示登录页） |
+
+> **无注册页、无找回流程**。密码来自 `FITBRIDGE_PASSWORD`；未设置时首次启动随机生成并打印到日志（仅一次）。
+> 重置密码：`docker compose exec server node dist/cli/reset-password.js`。
 
 ### 3.2 平台与连接
 

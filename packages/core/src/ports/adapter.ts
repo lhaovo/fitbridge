@@ -10,6 +10,11 @@ export interface Credential {
   secret: Record<string, unknown>;
   /** 非敏感元数据（如 MyWhoosh 的 whooshId） */
   meta?: Record<string, unknown>;
+  /** 登录信息（账号密码），与 secret 一起加密存储，用于 token 过期后自动重登 */
+  credentials?: {
+    account?: string;
+    password?: string;
+  };
   expiresAt?: string;
 }
 
@@ -24,6 +29,12 @@ export interface AuthInput {
   /** 自建应用凭证 */
   clientId?: string;
   clientSecret?: string;
+  /**
+   * 稳定设备标识。
+   * 部分 App 的登录请求带 DeviceId 并把 token 与之绑定，
+   * 同一安装实例应始终使用同一个值。
+   */
+  deviceId?: string;
 }
 
 /** 认证结果 */

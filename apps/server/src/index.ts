@@ -3,6 +3,7 @@ import { buildApp } from './app.js';
 import { Database } from './lib/db.js';
 import { LocalFileStore } from './lib/file-store.js';
 import { registerBuiltinPlatforms } from './lib/platforms.js';
+import { CredentialRepository } from './lib/credential-repository.js';
 import { bootstrap } from './lib/bootstrap.js';
 import { runMigrations } from './migrate.js';
 
@@ -23,7 +24,12 @@ async function main(): Promise<void> {
   registerBuiltinPlatforms();
 
   const fileStore = new LocalFileStore(config.blobDir);
-  const app = await buildApp({ config, db, fileStore });
+  const credentialRepo = new CredentialRepository(
+    db,
+    config.masterKey,
+    config.storePlatformPassword,
+  );
+  const app = await buildApp({ config, db, fileStore, credentialRepo });
 
   await app.listen({ host: config.host, port: config.port });
 

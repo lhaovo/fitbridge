@@ -1,4 +1,5 @@
 export * from './domain/activity.js';
+export * from './domain/credential.js';
 export * from './domain/storage.js';
 export * from './domain/sport.js';
 export * from './ports/manifest.js';

@@ -5,8 +5,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AppConfig } from './config.js';
 import { Database } from './lib/db.js';
+import { CredentialRepository } from './lib/credential-repository.js';
 import type { FileStore } from '@fitbridge/core';
 import { listManifests, getAdapter } from './lib/platforms.js';
+import { deriveDeviceId, relogin } from '@fitbridge/core';
 import { signToken, verifyToken } from './lib/crypto.js';
 import { checkLogin } from './lib/bootstrap.js';
 import { randomUUID } from 'node:crypto';
@@ -24,6 +26,7 @@ export interface AppDeps {
   config: AppConfig;
   db: Database;
   fileStore?: FileStore;
+  credentialRepo: CredentialRepository;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -159,24 +162,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   // ── 连接管理（连接平台账号） ────────────────────────────
   app.get('/api/v1/connections', async () => {
     if (!db.isAvailable) return { connections: [] };
-    const rows = await db.query(
-      `SELECT id, platform_id, label, status, last_validated_at, expires_at, created_at
-         FROM credentials
-        WHERE user_id = ?
-        ORDER BY created_at DESC`,
-      [DEFAULT_USER_ID],
-    );
-    return {
-      connections: rows.map((r) => ({
-        id: (r as { id: string }).id,
-        platformId: (r as { platform_id: string }).platform_id,
-        label: (r as { label?: string }).label,
-        status: (r as { status: string }).status,
-        lastValidatedAt: (r as { last_validated_at?: string }).last_validated_at,
-        expiresAt: (r as { expires_at?: string }).expires_at,
-        // 注意：永远不返回任何凭证内容
-      })),
-    };
+    // 注意：永远不返回任何凭证内容
+    return { connections: deps.credentialRepo.list() };
   });
 
   /**
@@ -213,11 +200,19 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       label?: string;
     };
 
+    // 稳定设备标识：同一安装实例 + 同一账号 → 每次登录都是同一个 DeviceId
+    const deviceId = deriveDeviceId(
+      config.masterKey,
+      platformId,
+      body.account,
+    );
+
     let authResult;
     try {
       authResult = await adapter.auth({
         account: body.account,
         password: body.password,
+        deviceId,
       });
     } catch (err) {
       return reply.code(401).send({
@@ -236,38 +231,88 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       });
     }
 
-    const { sealSecret } = await import('./lib/crypto.js');
-    const sealed = sealSecret(
-      JSON.stringify(authResult.secret),
-      config.masterKey,
-    );
-
-    const id = await db.one<{ id: string }>(
-      `INSERT INTO credentials
-         (id, user_id, platform_id, label, auth_type, secret_cipher, secret_iv,
-          secret_tag, key_version, meta, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
-       RETURNING id`,
-      [
-        randomUUID(),
-        DEFAULT_USER_ID,
-        platformId,
-        body.label ?? null,
-        adapter.manifest.authType,
-        sealed.cipher,
-        sealed.iv,
-        sealed.tag,
-        sealed.keyVersion,
-        JSON.stringify(authResult.meta ?? {}),
-      ],
-    );
+    const id = await deps.credentialRepo.create({
+      platformId,
+      label: body.label,
+      authType: adapter.manifest.authType,
+      secret: authResult.secret,
+      meta: authResult.meta,
+      // 账号密码与 token 一起加密保存 → token 过期后能自动重新登录
+      account: body.account,
+      password: body.password,
+      expiresAt: authResult.expiresAt,
+    });
 
     return {
-      id: id?.id,
+      id,
       platformId,
       status: 'active',
       // 不回传任何凭证内容
     };
+  });
+
+  /**
+   * 主动校验凭证有效性。
+   * 同时验证「token 过期后能否自动重新登录」这条路径。
+   */
+  app.post('/api/v1/connections/:id/validate', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const cred = deps.credentialRepo.get(id);
+    if (!cred) {
+      return reply
+        .code(404)
+        .send({ error: { code: 'NOT_FOUND', message: '凭证不存在' } });
+    }
+    const adapter = getAdapter(cred.platformId);
+    if (!adapter) {
+      return reply
+        .code(404)
+        .send({ error: { code: 'NOT_FOUND', message: '未知平台' } });
+    }
+
+    const health = await adapter.validate(cred);
+    deps.credentialRepo.setStatus(
+      id,
+      health.ok ? 'active' : 'expired',
+      health.ok ? undefined : health.reason,
+    );
+    return { ok: health.ok, reason: health.reason, checkedAt: health.checkedAt };
+  });
+
+  /**
+   * 用保存的账号密码重新登录，换一个新 token。
+   * 这是「token 过期 → 自动恢复」的执行体。
+   */
+  app.post('/api/v1/connections/:id/relogin', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const cred = deps.credentialRepo.get(id);
+    if (!cred) {
+      return reply
+        .code(404)
+        .send({ error: { code: 'NOT_FOUND', message: '凭证不存在' } });
+    }
+    const adapter = getAdapter(cred.platformId);
+    if (!adapter) {
+      return reply
+        .code(404)
+        .send({ error: { code: 'NOT_FOUND', message: '未知平台' } });
+    }
+    try {
+      const fresh = await relogin(adapter, cred);
+      await deps.credentialRepo.updateSecret(id, fresh.secret, fresh.meta);
+      deps.credentialRepo.setStatus(id, 'active');
+      return { ok: true };
+    } catch (err) {
+      deps.credentialRepo.setStatus(id, 'error', 'AUTH_EXPIRED');
+      return reply.code(401).send({
+        error: {
+          code: 'AUTH_EXPIRED',
+          message:
+            '重新登录失败: ' +
+            (err instanceof Error ? err.message : String(err)).slice(0, 200),
+        },
+      });
+    }
   });
 
   app.delete('/api/v1/connections/:id', async (req, reply) => {
@@ -277,10 +322,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         .code(503)
         .send({ error: { code: 'INTERNAL', message: '数据库不可用' } });
     }
-    await db.query(
-      'DELETE FROM credentials WHERE id = ? AND user_id = ?',
-      [id, DEFAULT_USER_ID],
-    );
+    deps.credentialRepo.remove(id);
     return { ok: true };
   });
 

@@ -34,6 +34,12 @@ export interface AppConfig {
   fileRetentionDays: number;
   derivedTtlDays: number;
   maxItemsPerRun: number;
+
+  /**
+   * 是否把平台账号密码一起加密保存。
+   * 开启后 token 过期能自动重新登录（无人值守同步需要）。
+   */
+  storePlatformPassword: boolean;
 }
 
 function env(key: string): string | undefined {
@@ -60,6 +66,8 @@ export function loadConfig(): AppConfig {
     fileRetentionDays: Number(env('FITBRIDGE_FILE_RETENTION_DAYS') ?? 90),
     derivedTtlDays: Number(env('FITBRIDGE_DERIVED_TTL_DAYS') ?? 7),
     maxItemsPerRun: Number(env('FITBRIDGE_MAX_ITEMS_PER_RUN') ?? 100),
+    storePlatformPassword:
+      (env('FITBRIDGE_STORE_PLATFORM_PASSWORD') ?? 'true').toLowerCase() !== 'false',
   };
 }
 

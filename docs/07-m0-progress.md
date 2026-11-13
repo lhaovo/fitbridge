@@ -12,7 +12,7 @@
 | 0.2 `packages/fitkit` 只读解析 | ✅ | 基于 fit-file-parser；14 个单测覆盖 |
 | 0.3 `packages/core` 契约 + 领域模型 | ✅ | PlatformAdapter / PlatformManifest / Activity / StoragePolicy / 流水线 |
 | 0.4 SQLite schema + 迁移 | ✅ | 11 张表 + 迁移器（启动自动跑，已实测） |
-| 0.5 服务端骨架 + 单用户认证 + 凭证加密 | ✅ | 已实测：登录/鉴权/连接列表/平台矩阵全部可用 |
+| 0.5 服务端骨架 + 单用户认证 + 凭证加密 | ✅ | 已实测；**含稳定 DeviceId + 加密存密码 + 自动重登** |
 | 0.6 Adapter `otm` | ⚠️ 离线验证 | 协议实现完成 + 8 个回归测试（未用真实账号验证） |
 | 0.7 Adapter `mywhoosh` | ⚠️ 离线验证 | 协议实现完成 + 5 个回归测试（未用真实账号验证） |
 | 0.8 同步引擎 | ⬜ | Pipeline 的 Discover/Fetch/Normalize 已就位，**编排与落库未接** |
@@ -114,13 +114,15 @@ fitbridge/
 | GET | `/api/v1/connections` | 已连接平台（**永不含凭证内容**） |
 | POST | `/api/v1/connections/:platformId` | 连接平台账号（账号密码 → 加密落库） |
 | DELETE | `/api/v1/connections/:id` | 删除凭证 |
+| POST | `/api/v1/connections/:id/validate` | 校验凭证有效性 |
+| POST | `/api/v1/connections/:id/relogin` | 用保存的账号密码换新 token（token 过期后自动恢复） |
 | GET | `/` | **Web 控制台**（登录 / 平台矩阵 / 连接账号） |
 
 ---
 
 ## 六、尚未实现（明确列入待办）
 
-- [ ] 同步引擎编排 + 落库 + 去重账本
+- [ ] 同步引擎编排 + 落库 + 去重账本（含 AUTH_EXPIRED → 自动重登 → 重试）
 - [ ] 文件保留期清理任务（L2 90 天 / L3 7 天）
 - [ ] 任务调度（进程内队列 → 需要时再上 BullMQ）
 - [ ] Web 控制台 v2：活动库 / 轨迹图 / 对比

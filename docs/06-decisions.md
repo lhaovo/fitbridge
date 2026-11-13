@@ -298,3 +298,62 @@ data/
 
 `node:sqlite` 需要 **Node >= 22.5**（本项目已在 `engines` 声明）。
 打包器/测试运行器可能还不认识它是内置模块，因此 `db.ts` 用 `createRequire` 动态加载。
+
+
+---
+
+## 七、登录方式与「能不能部署到 Linux 服务器」
+
+### 两层登录，都是纯 HTTP，无浏览器
+
+| 层 | 是什么 | 怎么做的 | 需要浏览器吗 |
+|----|--------|----------|--------------|
+| ① | 访问 FitBridge 控制台 | 密码表单 → `scrypt(salt:hash)` 存 SQLite → 校验通过下发 HttpOnly Cookie（HMAC-SHA256 签名） | **不需要** |
+| ② | 连接平台账号（迈金/MyWhoosh） | 密码表单 → **服务端直接发 HTTPS** 到平台登录接口 → 拿 token → AES-256-GCM 加密落库 | **不需要** |
+
+② 的实际请求：
+
+```
+迈金:     POST https://otm.onelap.cn/api/login
+          {account, password: MD5(password)} → data[0].token (JWT)
+
+MyWhoosh: POST https://services.mywhoosh.com/http-service/api/login
+          {Username, Password, Platform:"Android", Action:1001,
+           CorrelationId, DeviceId, Authorization:""}
+          → AccessToken / WhooshId / RefreshToken
+```
+
+整个代码库**零浏览器依赖**（无 Playwright / Puppeteer / WebView）。
+参考项目里那套 `WebBridge.kt + bridge.html` 只在平台**完全没有 API** 时才需要（Outbase / Keep / 两步路）。
+
+### 什么情况下才会需要浏览器
+
+只有当某个平台**完全没有 API、只能用网页操作**时。应对方案（M2）：
+
+- 用 Playwright + Chromium（Linux 容器里是标准配置，镜像会大几百 MB）
+- **不做自动绕过验证码** —— 而是「用户手动接管」：服务器上开远程浏览器，用户自己登录一次，凭证落盘
+- 没有 Playwright 时该平台标记为不支持，**其余平台照常工作**（降级而非阻断）
+
+### 部署到 Linux 服务器的真实风险（不是「能不能跑」）
+
+| 风险 | 说明 | 缓解 |
+|------|------|------|
+| 机房 IP 更易触发风控 | 迈金/佳明对数据中心 IP 比住宅 IP 敏感 | token 长期复用 + 登录最小间隔 + 熔断 |
+| IP 变化被判异地登录 | 出口 IP 变了可能收到平台提醒 | 尽量固定出口 |
+| 平台新增短信/验证码 | 目前两个平台都没有，但随时可能加 | 那时才启用 Web 兜底 |
+| node:sqlite 版本要求 | 需要 Node >= 22.5 | 已在 `engines` 声明；Docker 镜像用 node:22-alpine |
+
+### 为服务器部署补的两个关键改动
+
+**1. 稳定 DeviceId**（MyWhoosh）
+部分 App 会把 token 与设备 ID 绑定。服务器上每次登录都换 DeviceId 容易被判异常。
+现改为 `deriveDeviceId(masterKey, platformId, account)` —— 同一安装实例 + 同一账号恒定不变。
+
+**2. 平台密码加密保存 → token 过期自动重登**
+原先密码不落库，token 一旦过期就卡死（无法无人值守）。
+现改为账号密码与 token 存在**同一个** AES-256-GCM 密文里：
+
+- 不引入新的攻击面 —— 能读密文的人本来就持有同一个 `master.key`（同一数据目录）
+- `POST /api/v1/connections/:id/relogin` 用保存的密码换新 token
+- 引擎遇到 `AUTH_EXPIRED` 时自动重登一次并重试原请求
+- 可用 `FITBRIDGE_STORE_PLATFORM_PASSWORD=false` 关闭（则需人工重新输入密码）

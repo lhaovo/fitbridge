@@ -34,8 +34,9 @@ export async function login(
         Password: input.password,
         Platform: 'Android',
         Action: 1001,
+        // CorrelationId 每次请求都换；DeviceId 必须稳定（token 可能与设备绑定）
         CorrelationId: randomUUID(),
-        DeviceId: randomUUID(),
+        DeviceId: input.deviceId ?? randomUUID(),
         Authorization: '',
       },
     },

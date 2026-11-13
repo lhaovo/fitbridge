@@ -357,3 +357,68 @@ MyWhoosh: POST https://services.mywhoosh.com/http-service/api/login
 - `POST /api/v1/connections/:id/relogin` 用保存的密码换新 token
 - 引擎遇到 `AUTH_EXPIRED` 时自动重登一次并重试原请求
 - 可用 `FITBRIDGE_STORE_PLATFORM_PASSWORD=false` 关闭（则需人工重新输入密码）
+
+
+---
+
+## 八、风控防护：把参考项目的踩坑经验固化成代码
+
+### 参考项目实测到的风控行为（原文摘录）
+
+| 参考项目原文 | 出处 | 含义 |
+|---|---|---|
+| 「佳明对错误密码敏感：**输错一次即可能触发风控**」 | LoginWebActivity.kt:376 | 密码错一次就危险 |
+| 「冷却期约数小时到一天」 | 同上 | 触发后等很久 |
+| 「**冷却期内反复尝试会延长封禁**」 | 同上:402 | 重试让情况更糟 |
+| 「勿同时登录开发体验版与正式版」 | 同上:404 | 同账号多端并发也触发 |
+| 「优先 OAuth1 账号密码直连（绕开 mobile SSO 每天一次限制与 **WebView 按钮风控**）」 | 同上:332 | **API 直连比 WebView 点按钮更安全** |
+| 「若清空风控后强行尝试登录，**可能增加冷却时间**」 | 同上:301 | 解除冷却也要谨慎 |
+
+它还维护了一张风控关键词表（同上:1808）：
+```js
+['password','invalid','incorrect','two-step','two step','verification','security code',
+ 'rate limit','too many','429','密码','无效','用户名','验证码','两步','频繁','风控','限流']
+```
+
+### 结论：风控由「登录行为模式」触发，不由「HTTP 还是浏览器」触发
+
+| 因素 | 参考项目（WebView 为主） | FitBridge（纯 API） | 评价 |
+|---|---|---|---|
+| 登录频率 | WebView 每次都要重新登录 | token 复用 + refresh_token | 我们更好 |
+| 密码错后重试 | 多通道轮换，错一次即风控 | **失败直接返回，绝不自动重试** | 我们更好 |
+| 同账号多端并发 | App + Web 端可能同时 | 单用户单实例 | 我们更好 |
+| IP 信誉 | 用户手机 / 家庭宽带 | **机房 IP（更可疑）** | 我们更差 |
+| 设备指纹 | 真 WebView，自然一致 | 自造 header，需伪装 | 需要注意 |
+| 验证码 / MFA | WebView 能人工过 | 纯 HTTP 过不了 | 平台加码时受限 |
+
+### 已实现的防护（packages/core/src/engine/risk.ts + apps/server/src/lib/risk-guard.ts）
+
+1. **失败分类**（`classifyAuthFailure`）
+   五类：`rate-limited` / `challenge-required` / `invalid-credential` / `ambiguous` / `unknown`
+   ★ 关键：**模糊词按风控保守处理**。只出现 `invalid` / `password` 时判为 `ambiguous` 并冷却 ——
+   因为参考项目发现平台常把风控包装成「密码错误」，贸然当成密码错去重试反而会触发风控。
+
+2. **账号级冷却**（`RiskGuard`，持久化到 SQLite `auth_guard` 表）
+   - 冷却期内**硬拒绝**一切登录尝试，并返回剩余分钟数
+   - 连续失败会延长冷却，但**有上限**（默认 60min，最多 4 倍）
+   - 冷却按 (platform, account) 维度隔离，不同账号互不影响
+
+3. **登录节流**
+   - 成功后记录 `last_login_at`
+   - 下次登录若距上次不足 `minLoginIntervalSec`（迈金 5 分钟）→ 拒绝，提示复用已有 token
+
+4. **绝不自动重试密码**
+   - 所有登录失败都返回 `willAutoRetry: false`
+   - 引擎侧只在**技术性失败**（网络/5xx）时重试
+
+5. **手动解除冷却需显式确认**
+   - `POST /api/v1/risk-guard/clear` 要求 `confirm=true`
+   - 提示语沿用参考项目：「强行尝试登录可能增加冷却时间」
+
+### 仍需真实账号验证的残留风险
+
+| 风险 | 说明 | 现状 |
+|------|------|------|
+| 机房 IP 触发 | 迈金 / MyWhoosh 对数据中心 IP 可能更敏感 | 冷却 + 节流能缓解，但无法根治；建议固定出口 IP |
+| header 指纹 | 自造 UA 可能与真实浏览器不一致 | 已用桌面 Chrome UA + `Origin/Referer`；待真实账号观察 |
+| 平台新增验证 | 加了短信/验证码就只能走 Web 兜底（M2） | 已预留降级路径 |

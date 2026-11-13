@@ -6,5 +6,6 @@ export * from './ports/manifest.js';
 export * from './ports/adapter.js';
 export * from './ports/file-store.js';
 export * from './engine/errors.js';
+export * from './engine/risk.js';
 export * from './engine/pipeline.js';
 export * from './lib/http.js';

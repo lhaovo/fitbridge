@@ -6,9 +6,10 @@ import { fileURLToPath } from 'node:url';
 import type { AppConfig } from './config.js';
 import { Database } from './lib/db.js';
 import { CredentialRepository } from './lib/credential-repository.js';
+import { RiskGuard } from './lib/risk-guard.js';
 import type { FileStore } from '@fitbridge/core';
 import { listManifests, getAdapter } from './lib/platforms.js';
-import { deriveDeviceId, relogin } from '@fitbridge/core';
+import { classifyAuthFailure, deriveDeviceId, relogin } from '@fitbridge/core';
 import { signToken, verifyToken } from './lib/crypto.js';
 import { checkLogin } from './lib/bootstrap.js';
 import { randomUUID } from 'node:crypto';
@@ -27,6 +28,7 @@ export interface AppDeps {
   db: Database;
   fileStore?: FileStore;
   credentialRepo: CredentialRepository;
+  riskGuard: RiskGuard;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -200,6 +202,22 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       label?: string;
     };
 
+    const account = body.account ?? '';
+
+    // ① 风控闸门：冷却期内拒绝一切登录尝试（反复尝试会延长封禁）
+    const minInterval = adapter.manifest.rateLimit.minLoginIntervalSec ?? 0;
+    const gate = deps.riskGuard.check(platformId, account, minInterval);
+    if (!gate.allowed) {
+      return reply.code(429).send({
+        error: {
+          code: 'RATE_LIMITED',
+          message: gate.reason,
+        },
+        retryAfterMinutes: gate.retryAfterMinutes,
+        kind: gate.kind,
+      });
+    }
+
     // 稳定设备标识：同一安装实例 + 同一账号 → 每次登录都是同一个 DeviceId
     const deviceId = deriveDeviceId(
       config.masterKey,
@@ -215,15 +233,31 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         deviceId,
       });
     } catch (err) {
-      return reply.code(401).send({
+      const raw = err instanceof Error ? err.message : String(err);
+      const failure = classifyAuthFailure(raw);
+
+      // ② 失败分类：区分「密码错」与「风控」
+      //    ★ 绝不自动重试 —— 参考项目原文：输错一次即可能触发风控
+      deps.riskGuard.recordFailure(platformId, account, failure);
+
+      const status = failure.shouldCooldown ? 429 : 401;
+      return reply.code(status).send({
         error: {
-          code: 'AUTH_EXPIRED',
+          code: failure.shouldCooldown ? 'RATE_LIMITED' : 'AUTH_EXPIRED',
           message:
-            '平台认证失败: ' +
-            (err instanceof Error ? err.message : String(err)).slice(0, 200),
+            failure.message +
+            '（原始错误：' +
+            raw.slice(0, 160) +
+            '）',
         },
+        kind: failure.kind,
+        retryAfterMinutes: failure.cooldownMinutes || undefined,
+        willAutoRetry: false,
       });
     }
+
+    // ③ 成功：清除冷却、记录登录时间
+    deps.riskGuard.recordSuccess(platformId, account);
 
     if (!db.isAvailable) {
       return reply.code(503).send({
@@ -313,6 +347,44 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         },
       });
     }
+  });
+
+  /**
+   * 风控状态查询（供 UI 展示告警）。
+   */
+  app.get('/api/v1/risk-guard', async () => {
+    return { guards: deps.riskGuard.listGuarded() };
+  });
+
+  /**
+   * 手动解除冷却。
+   *
+   * 参考项目有「清空风控」功能，但带确认提示：
+   *   「若清空风控后强行尝试登录，可能增加冷却时间」
+   * 所以这里同样要求显式确认参数。
+   */
+  app.post('/api/v1/risk-guard/clear', async (req, reply) => {
+    const body = (req.body ?? {}) as {
+      platformId?: string;
+      account?: string;
+      confirm?: boolean;
+    };
+    if (!body.confirm) {
+      return reply.code(400).send({
+        error: {
+          code: 'CONFIG_ERROR',
+          message:
+            '解除冷却需要 confirm=true。强行登录可能增加冷却时间，请确认账号密码正确后再操作。',
+        },
+      });
+    }
+    if (!body.platformId || !body.account) {
+      return reply.code(400).send({
+        error: { code: 'CONFIG_ERROR', message: '缺少 platformId / account' },
+      });
+    }
+    deps.riskGuard.clear(body.platformId, body.account);
+    return { ok: true };
   });
 
   app.delete('/api/v1/connections/:id', async (req, reply) => {

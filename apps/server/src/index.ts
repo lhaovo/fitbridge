@@ -4,6 +4,7 @@ import { Database } from './lib/db.js';
 import { LocalFileStore } from './lib/file-store.js';
 import { registerBuiltinPlatforms } from './lib/platforms.js';
 import { CredentialRepository } from './lib/credential-repository.js';
+import { RiskGuard } from './lib/risk-guard.js';
 import { bootstrap } from './lib/bootstrap.js';
 import { runMigrations } from './migrate.js';
 
@@ -29,7 +30,18 @@ async function main(): Promise<void> {
     config.masterKey,
     config.storePlatformPassword,
   );
-  const app = await buildApp({ config, db, fileStore, credentialRepo });
+  const riskGuard = new RiskGuard(db, {
+    defaultCooldownMinutes: Number(
+      process.env.FITBRIDGE_AUTH_COOLDOWN_MINUTES ?? 60,
+    ),
+  });
+  const app = await buildApp({
+    config,
+    db,
+    fileStore,
+    credentialRepo,
+    riskGuard,
+  });
 
   await app.listen({ host: config.host, port: config.port });
 

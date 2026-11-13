@@ -13,6 +13,7 @@
 | 0.3 `packages/core` 契约 + 领域模型 | ✅ | PlatformAdapter / PlatformManifest / Activity / StoragePolicy / 流水线 |
 | 0.4 SQLite schema + 迁移 | ✅ | 11 张表 + 迁移器（启动自动跑，已实测） |
 | 0.5 服务端骨架 + 单用户认证 + 凭证加密 | ✅ | 已实测；**含稳定 DeviceId + 加密存密码 + 自动重登** |
+| 0.5b **风控防护** | ✅ | 失败分类 + 账号级冷却 + 登录节流 + 绝不自动重试（21 个单测） |
 | 0.6 Adapter `otm` | ⚠️ 离线验证 | 协议实现完成 + 8 个回归测试（未用真实账号验证） |
 | 0.7 Adapter `mywhoosh` | ⚠️ 离线验证 | 协议实现完成 + 5 个回归测试（未用真实账号验证） |
 | 0.8 同步引擎 | ⬜ | Pipeline 的 Discover/Fetch/Normalize 已就位，**编排与落库未接** |
@@ -44,6 +45,8 @@
 | 迈金上传字段名是 `jilu0` | 官方网页 JS 用 `jilu`，程序化上传必须 `jilu0`（已写进回归测试） |
 | MyWhoosh 响应容器有 6 种形态 | `data.results` / `data[]` / `activities` / `results` / `rides` / `rideHistory` |
 | 本环境 npm 官方源 tarball 不可达 | 已配置 `.npmrc` 走 npmmirror 镜像 |
+| 参考项目实测：**WebView 点按钮比 API 直连更易触发风控** | 参考项目自己的注释：优先 OAuth1 直连「绕开 WebView 按钮风控」 |
+| 参考项目实测：**密码输错一次即可能触发风控**，冷却期数小时~一天 | 已实现失败分类 + 账号级冷却 + 绝不自动重试 |
 | `node:sqlite` 需要 Node >= 22.5 | 已在 `engines` 声明；且部分打包器不认识它是内置模块 → `db.ts` 用 `createRequire` 动态加载 |
 | GitHub SSH 22 端口被环境代理阻断 | 改走 `ssh.github.com:443`；主机密钥指纹与官方一致 |
 
@@ -116,6 +119,8 @@ fitbridge/
 | DELETE | `/api/v1/connections/:id` | 删除凭证 |
 | POST | `/api/v1/connections/:id/validate` | 校验凭证有效性 |
 | POST | `/api/v1/connections/:id/relogin` | 用保存的账号密码换新 token（token 过期后自动恢复） |
+| GET | `/api/v1/risk-guard` | 风控/冷却状态 |
+| POST | `/api/v1/risk-guard/clear` | 手动解除冷却（需 confirm=true） |
 | GET | `/` | **Web 控制台**（登录 / 平台矩阵 / 连接账号） |
 
 ---

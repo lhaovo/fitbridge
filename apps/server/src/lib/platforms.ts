@@ -20,6 +20,10 @@ export function getAdapter(platformId: string): PlatformAdapter | undefined {
   return registry.get(platformId);
 }
 
+export function listAdapters(): Map<string, PlatformAdapter> {
+  return registry;
+}
+
 export function listManifests(): PlatformManifest[] {
   return [...registry.values()]
     .map((a) => a.manifest)

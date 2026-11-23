@@ -1,4 +1,4 @@
-import { HttpClient } from '@fitbridge/core';
+import { HttpClient, PlatformHttpError } from '@fitbridge/core';
 
 export const MYWHOOSH_LOGIN_URL =
   'https://services.mywhoosh.com/http-service/api/login';
@@ -30,6 +30,13 @@ export class MyWhooshClient {
         'Content-Type': 'application/json; charset=utf-8',
       },
     });
+    if (!res.ok) {
+      throw new PlatformHttpError(
+        res.status,
+        'MyWhoosh ' + path + ' HTTP ' + res.status,
+        JSON.stringify(res.json ?? {}),
+      );
+    }
     return { status: res.status, ok: res.ok, json: res.json };
   }
 }

@@ -1,4 +1,4 @@
-import type { FitSummary } from '@fitbridge/fitkit';
+import type { FitSummary, SportType } from '@fitbridge/fitkit';
 import { detectFileKind, readFit } from '@fitbridge/fitkit';
 import type { Credential } from '../ports/adapter.js';
 import type {
@@ -23,7 +23,9 @@ export interface NormalizedActivity {
     shortCode: string;
   };
   name: string;
-  sportType: string;
+  sportType: SportType;
+  /** 平台原始运动类型，未能归类时保留 */
+  rawSportType?: string;
   startTime?: string;
   timezoneOffsetMin?: number;
   timezoneSource: FitSummary['timezoneSource'];
@@ -150,6 +152,7 @@ export async function normalize(
     },
     name: activity.name ?? fit?.rawSportType ?? adapter.manifest.displayName,
     sportType: fit?.sportType ?? 'other',
+    rawSportType: fit?.rawSportType,
     startTime: activity.startTime ?? fit?.startTime,
     timezoneOffsetMin,
     timezoneSource,

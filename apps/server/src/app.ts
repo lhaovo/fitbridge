@@ -7,9 +7,20 @@ import type { AppConfig } from './config.js';
 import { Database } from './lib/db.js';
 import { CredentialRepository } from './lib/credential-repository.js';
 import { RiskGuard } from './lib/risk-guard.js';
+import { listEvents } from './lib/repositories.js';
 import type { FileStore } from '@fitbridge/core';
-import { listManifests, getAdapter } from './lib/platforms.js';
-import { classifyAuthFailure, deriveDeviceId, relogin } from '@fitbridge/core';
+import { listManifests, getAdapter, listAdapters } from './lib/platforms.js';
+import {
+  classifyAuthFailure,
+  deriveDeviceId,
+  relogin,
+  runSync,
+  DEFAULT_SYNC_POLICY,
+  type ActivityQuery,
+  type ActivityStore,
+  type EventSink,
+  type SyncTaskSpec,
+} from '@fitbridge/core';
 import { signToken, verifyToken } from './lib/crypto.js';
 import { checkLogin } from './lib/bootstrap.js';
 import { randomUUID } from 'node:crypto';
@@ -29,6 +40,10 @@ export interface AppDeps {
   fileStore?: FileStore;
   credentialRepo: CredentialRepository;
   riskGuard: RiskGuard;
+  /** 活动持久化 */
+  store: ActivityStore;
+  /** 事件写入 */
+  events: EventSink;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
@@ -347,6 +362,190 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         },
       });
     }
+  });
+
+  // ── 同步 ────────────────────────────────────────────────
+  /**
+   * 触发一次同步。
+   *
+   * body: { sourcePlatforms, targetPlatforms, filters, policy, dryRun }
+   */
+  app.post('/api/v1/sync/run', async (req, reply) => {
+    const body = (req.body ?? {}) as Partial<SyncTaskSpec> & {
+      dryRun?: boolean;
+    };
+
+    const sourcePlatforms = body.sourcePlatforms ?? [];
+    const targetPlatforms = body.targetPlatforms ?? [];
+    if (!Array.isArray(sourcePlatforms) || sourcePlatforms.length === 0) {
+      return reply.code(400).send({
+        error: { code: 'CONFIG_ERROR', message: '至少指定一个来源平台' },
+      });
+    }
+
+    const task: SyncTaskSpec = {
+      sourcePlatforms,
+      targetPlatforms: targetPlatforms ?? [],
+      filters: body.filters ?? {},
+      policy: { ...DEFAULT_SYNC_POLICY, ...(body.policy ?? {}) },
+    };
+
+    try {
+      const summary = await runSync({
+        task,
+        userId: DEFAULT_USER_ID,
+        dryRun: body.dryRun,
+        deps: {
+          adapters: listAdapters(),
+          credentials: async (platformId) =>
+            deps.credentialRepo.getByPlatform(platformId),
+          files: deps.fileStore!,
+          store: deps.store,
+          events: deps.events,
+          gate: async (platformId, account) => {
+            const adapter = getAdapter(platformId);
+            const minInterval =
+              adapter?.manifest.rateLimit.minLoginIntervalSec ?? 0;
+            const d = deps.riskGuard.check(platformId, account ?? '', minInterval);
+            return d.allowed
+              ? undefined
+              : {
+                  allowed: false,
+                  retryAfterMinutes: d.retryAfterMinutes,
+                  reason: d.reason,
+                };
+          },
+        },
+      });
+      return { summary };
+    } catch (err) {
+      return reply.code(500).send({
+        error: {
+          code: 'INTERNAL',
+          message: err instanceof Error ? err.message : String(err),
+        },
+      });
+    }
+  });
+
+  // ── 活动（统一运动库） ──────────────────────────────────
+  app.get('/api/v1/activities', async (req) => {
+    const q = req.query as Record<string, string | undefined>;
+    const query: ActivityQuery = {
+      userId: DEFAULT_USER_ID,
+      limit: Math.min(Number(q.limit ?? 100), 500),
+      offset: Number(q.offset ?? 0),
+      sourcePlatform: q.platform ? q.platform.split(',') : undefined,
+      sportType: q.sport ? q.sport.split(',') : undefined,
+      since: q.since,
+      until: q.until,
+      keyword: q.q,
+      syncState: q.state ? q.state.split(',') : undefined,
+      sort: q.sort === 'created_at' ? 'created_at' : 'start_time',
+      order: q.order === 'asc' ? 'asc' : 'desc',
+    };
+    const { items, total } = await deps.store.list(DEFAULT_USER_ID, query);
+    return {
+      total,
+      limit: query.limit,
+      offset: query.offset,
+      activities: items.map((a) => ({
+        id: a.id,
+        source: a.source,
+        name: a.name,
+        sportType: a.sportType,
+        startTime: a.startTime,
+        durationSec: a.durationSec,
+        distanceMeters: a.distanceMeters,
+        elevationGainMeters: a.elevationGainMeters,
+        metrics: a.metrics,
+        flags: a.flags,
+        syncState: a.syncState,
+        syncedTargets: a.syncedTargets,
+        createdAt: a.createdAt,
+      })),
+    };
+  });
+
+  app.get('/api/v1/activities/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const a = await deps.store.get(DEFAULT_USER_ID, id);
+    if (!a) {
+      return reply
+        .code(404)
+        .send({ error: { code: 'NOT_FOUND', message: '活动不存在' } });
+    }
+    const files = await deps.store.listFiles(id);
+    return { activity: a, files };
+  });
+
+  /** 下载原始文件 */
+  app.get('/api/v1/activities/:id/file', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const a = await deps.store.get(DEFAULT_USER_ID, id);
+    if (!a) {
+      return reply
+        .code(404)
+        .send({ error: { code: 'NOT_FOUND', message: '活动不存在' } });
+    }
+    const files = await deps.store.listFiles(id);
+    const file = files[0];
+    if (!file) {
+      return reply
+        .code(404)
+        .send({ error: { code: 'NOT_FOUND', message: '没有文件' } });
+    }
+    if (file.expired) {
+      return reply.code(410).send({
+        error: { code: 'NOT_FOUND', message: '文件已过保留期被清理' },
+      });
+    }
+    const content = await deps.fileStore!.get(file.blobKey);
+    reply.header(
+      'Content-Type',
+      file.kind === 'fit' ? 'application/octet-stream' : 'application/octet-stream',
+    );
+    reply.header(
+      'Content-Disposition',
+      'attachment; filename="' +
+        (a.name.replace(/[^\w.\u4e00-\u9fa5-]+/g, '_').slice(0, 60) || id) +
+        '.' +
+        (file.kind === 'fit' ? 'fit' : file.kind),
+    );
+    return reply.send(content);
+  });
+
+  /** 删除活动（本地副本） */
+  app.delete('/api/v1/activities/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const a = await deps.store.get(DEFAULT_USER_ID, id);
+    if (!a) {
+      return reply
+        .code(404)
+        .send({ error: { code: 'NOT_FOUND', message: '活动不存在' } });
+    }
+    const files = await deps.store.listFiles(id);
+    for (const f of files) {
+      await deps.fileStore!.delete(f.blobKey).catch(() => undefined);
+    }
+    deps.db.run('DELETE FROM activities WHERE id = ? AND user_id = ?', [
+      id,
+      DEFAULT_USER_ID,
+    ]);
+    return { ok: true };
+  });
+
+  /** 事件历史 */
+  app.get('/api/v1/events', async (req) => {
+    const q = req.query as Record<string, string | undefined>;
+    return {
+      events: listEvents(deps.db, DEFAULT_USER_ID, {
+        limit: Math.min(Number(q.limit ?? 100), 500),
+        offset: Number(q.offset ?? 0),
+        level: q.level,
+        category: q.category,
+      }),
+    };
   });
 
   /**

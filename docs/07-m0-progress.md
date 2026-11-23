@@ -16,17 +16,17 @@
 | 0.5b **风控防护** | ✅ | 失败分类 + 账号级冷却 + 登录节流 + 绝不自动重试（21 个单测） |
 | 0.6 Adapter `otm` | ⚠️ 离线验证 | 协议实现完成 + 8 个回归测试（未用真实账号验证） |
 | 0.7 Adapter `mywhoosh` | ⚠️ 离线验证 | 协议实现完成 + 5 个回归测试（未用真实账号验证） |
-| 0.8 同步引擎 | ⬜ | Pipeline 的 Discover/Fetch/Normalize 已就位，**编排与落库未接** |
-| 0.9 Web 控制台 | ✅ v1 | 登录 / 平台能力矩阵 / 连接账号 / 已连接列表（已截图验证） |
+| 0.8 同步引擎 | ✅ | Discover→Fetch→Normalize→Dedupe→Fanout→Upload 全流程（14 单测） |
+| 0.9 Web 控制台 | ✅ v2 | 同步编排(预览/执行) + 活动库(筛选/详情/下载) + 平台矩阵 + 事件流（已截图验证） |
 | 0.10 导出 + 备份 + 部署文档 | ⚠️ 部分 | backup/restore 已适配 SQLite；「导出全部」功能未做 |
 
 **下一步（按风险从高到低）**：
 
 1. **用真实账号验证两个适配器**（最高风险：逆向接口细节可能已变）
-2. 同步引擎落地：发现 → 下载 → 落库（activity + activity_files）→ 去重账本
-3. 文件保留期清理任务（L2 90 天 / L3 7 天）
-4. Web 控制台 v2：活动库列表/详情 + 轨迹图
-5. MyWhoosh → 迈金 的真实上传闭环
+2. **真实账号跑一次完整同步**（引擎已就绪，缺的是真实数据验证）
+3. MyWhoosh → 迈金 的真实上传闭环（若 MyWhoosh 给的是 FIT 则无需转换）
+4. 定时任务调度 + 活动详情轨迹图
+5. GPX→FIT 构建（仅当 MyWhoosh 实际返回 GPX 时才需要）
 
 ---
 
@@ -48,6 +48,7 @@
 | 参考项目实测：**WebView 点按钮比 API 直连更易触发风控** | 参考项目自己的注释：优先 OAuth1 直连「绕开 WebView 按钮风控」 |
 | 参考项目实测：**密码输错一次即可能触发风控**，冷却期数小时~一天 | 已实现失败分类 + 账号级冷却 + 绝不自动重试 |
 | `node:sqlite` 需要 Node >= 22.5 | 已在 `engines` 声明；且部分打包器不认识它是内置模块 → `db.ts` 用 `createRequire` 动态加载 |
+| 适配器抛异常会**丢掉 HTTP 状态码** | 已引入 `PlatformHttpError`；否则「401 Unauthorized」会被判成 unknown，token 过期就不会自动重登 |
 | GitHub SSH 22 端口被环境代理阻断 | 改走 `ssh.github.com:443`；主机密钥指纹与官方一致 |
 
 ---
@@ -121,16 +122,22 @@ fitbridge/
 | POST | `/api/v1/connections/:id/relogin` | 用保存的账号密码换新 token（token 过期后自动恢复） |
 | GET | `/api/v1/risk-guard` | 风控/冷却状态 |
 | POST | `/api/v1/risk-guard/clear` | 手动解除冷却（需 confirm=true） |
+| POST | `/api/v1/sync/run` | 触发同步（支持 dryRun 预览） |
+| GET | `/api/v1/activities` | 活动库列表（多维筛选） |
+| GET | `/api/v1/activities/:id` | 活动详情 + 文件列表 |
+| GET | `/api/v1/activities/:id/file` | 下载原始文件 |
+| DELETE | `/api/v1/activities/:id` | 删除本地副本（含 blob） |
+| GET | `/api/v1/events` | 事件历史 |
 | GET | `/` | **Web 控制台**（登录 / 平台矩阵 / 连接账号） |
 
 ---
 
 ## 六、尚未实现（明确列入待办）
 
-- [ ] 同步引擎编排 + 落库 + 去重账本（含 AUTH_EXPIRED → 自动重登 → 重试）
-- [ ] 文件保留期清理任务（L2 90 天 / L3 7 天）
-- [ ] 任务调度（进程内队列 → 需要时再上 BullMQ）
-- [ ] Web 控制台 v2：活动库 / 轨迹图 / 对比
+- [x] 同步引擎编排 + 落库 + 去重账本（含 AUTH_EXPIRED → 自动重登 → 重试）
+- [x] 文件保留期清理任务（L2 90 天 / L3 7 天，启动时 + 每 6h）
+- [ ] 定时任务调度（目前只能手动 / API 触发）
+- [ ] 活动详情页：轨迹图 + 指标图表 + 多平台对比
 - [ ] GPX→FIT 构建（M1，`fitkit/src/build.ts`）
 - [ ] FIT 合规修复（M1，`fitkit/src/repair.ts`）
 - [ ] 限流 / 退避 / 熔断（Policy 层）

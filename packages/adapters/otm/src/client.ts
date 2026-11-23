@@ -1,4 +1,8 @@
-import { HttpClient, type HttpResponse } from '@fitbridge/core';
+import {
+  HttpClient,
+  PlatformHttpError,
+  type HttpResponse,
+} from '@fitbridge/core';
 
 export const OTM_BASE = 'https://otm.onelap.cn';
 
@@ -37,8 +41,10 @@ export class OtmClient {
       json?: unknown;
       form?: FormData;
       timeoutMs?: number;
+      what?: string;
     } = {},
   ): Promise<HttpResponse<OtmEnvelope<T>>> {
+    const what = opts.what ?? '请求';
     const res = await this.http.request<OtmEnvelope<T>>(path, {
       method: opts.method ?? 'GET',
       json: opts.json,
@@ -49,6 +55,14 @@ export class OtmClient {
         ...(opts.form ? {} : { 'Content-Type': 'application/json; charset=utf-8' }),
       },
     });
+    // HTTP 层失败必须带上状态码（否则 401 会被当成普通错误，token 过期不会自动重登）
+    if (!res.ok) {
+      throw new PlatformHttpError(
+        res.status,
+        what + ' HTTP ' + res.status,
+        JSON.stringify(res.json ?? {}),
+      );
+    }
     return res;
   }
 

@@ -112,6 +112,23 @@ export function classifyAuthFailure(
 
   const hit = (list: string[]) => list.some((k) => text.includes(k));
 
+  // 明确的 401：凭证失效（而不是密码错）
+  const looksUnauthorized =
+    opts.status === 401 ||
+    /\b401\b/.test(text) ||
+    text.includes('unauthorized') ||
+    text.includes('token expired') ||
+    text.includes('token invalid');
+  if (looksUnauthorized) {
+    return {
+      kind: 'invalid-credential',
+      shouldCooldown: false,
+      cooldownMinutes: 0,
+      message: '凭证已失效（401），需要重新登录。',
+      raw,
+    };
+  }
+
   if (opts.status === 429 || hit(RATE_LIMIT_KEYWORDS)) {
     return {
       kind: 'rate-limited',

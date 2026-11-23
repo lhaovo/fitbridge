@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSyntheticFit } from './fixture.js';
+import { buildSyntheticFit } from '../src/testing.js';
 import { detectFileKind, isFitFile, readFit } from '../src/index.js';
 
 const START = new Date('2026-03-15T06:30:00.000Z');

@@ -91,3 +91,23 @@ code {
   background: var(--panel-2); padding: 1px 5px; border-radius: 4px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
 }
+
+/* ── 同步面板 ─────────────────────────────────────────── */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--panel-2); font-size: 13px; cursor: pointer; user-select: none;
+}
+.chip input { width: auto; margin: 0; }
+.chip:hover { border-color: var(--accent); }
+.muted { color: var(--muted); }
+.out { margin-top: 14px; }
+.out table { margin-top: 6px; }
+.btn-link {
+  font-size: 12.5px; text-decoration: none; padding: 3px 8px;
+  border: 1px solid var(--border); border-radius: 6px; color: var(--muted);
+}
+.btn-link:hover { color: var(--accent); border-color: var(--accent); }
+.spacer { flex: 1; }
+#acts table td { vertical-align: top; }

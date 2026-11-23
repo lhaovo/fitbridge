@@ -1,11 +1,16 @@
-/* FitBridge 控制台（M0 早期版本） */
-const $ = (sel, el = document) => el.querySelector(sel);
-const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
+/* FitBridge 控制台 */
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 
 const state = {
   user: null,
   platforms: [],
   connections: [],
+  activities: [],
+  total: 0,
+  events: [],
+  filters: { q: '', platform: '', sport: '', since: '', until: '' },
+  busy: false,
 };
 
 async function api(path, opts = {}) {
@@ -21,30 +26,35 @@ async function api(path, opts = {}) {
     const e = new Error(data?.error?.message || ('HTTP ' + res.status));
     e.code = data?.error?.code;
     e.status = res.status;
+    e.payload = data;
     throw e;
   }
   return data;
 }
 
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, (c) =>
+const esc = (s) =>
+  String(s ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
 
-/* ── 渲染：登录 ───────────────────────────────────────── */
+const fmtDist = (m) => (m == null ? '—' : (m / 1000).toFixed(2) + ' km');
+const fmtDur = (s) => {
+  if (s == null) return '—';
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h > 0 ? h + 'h ' + String(m).padStart(2, '0') + 'm' : m + 'm';
+};
+const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('zh-CN', { hour12: false }) : '—');
+
+/* ── 登录 ─────────────────────────────────────────────── */
 function renderLogin(msg) {
   document.body.innerHTML = `
     <div class="login card">
       <h3 style="margin-bottom:2px">FitBridge</h3>
       <p class="hint" style="margin-bottom:14px">多平台运动数据同步 · 单用户自托管</p>
       <label>管理员密码</label>
-      <input id="pwd" type="password" autocomplete="current-password" placeholder="FITBRIDGE_PASSWORD" />
+      <input id="pwd" type="password" autocomplete="current-password" />
       <div class="err" id="err"></div>
-      <div class="row end" style="margin-top:12px">
-        <button class="primary" id="go">登录</button>
-      </div>
+      <div class="row end" style="margin-top:12px"><button class="primary" id="go">登录</button></div>
     </div>`;
-
   const submit = async () => {
     $('#err').textContent = '';
     $('#go').disabled = true;
@@ -62,7 +72,7 @@ function renderLogin(msg) {
   if (msg) $('#err').textContent = msg;
 }
 
-/* ── 渲染：主界面 ─────────────────────────────────────── */
+/* ── 主框架 ───────────────────────────────────────────── */
 function renderApp() {
   document.body.innerHTML = `
     <header class="top">
@@ -73,29 +83,247 @@ function renderApp() {
       <button id="logout">退出</button>
     </header>
     <div class="wrap">
+
+      <h1>同步</h1>
+      <p class="hint">选择来源与目标平台 → 先「预览」确认影响面，再执行。目标平台仅在已连接且支持上传时可选。</p>
+      <div class="card">
+        <div class="row" style="gap:16px;align-items:flex-start">
+          <div style="flex:1;min-width:260px">
+            <label>来源平台（可多选）</label>
+            <div id="src-list" class="chips"></div>
+          </div>
+          <div style="flex:1;min-width:260px">
+            <label>目标平台（可多选）</label>
+            <div id="dst-list" class="chips"></div>
+          </div>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <label style="margin:0">条数上限</label>
+          <input id="max-items" type="number" value="50" min="1" max="500" style="width:90px" />
+          <div class="spacer" style="flex:1"></div>
+          <button id="dry">预览（不写入）</button>
+          <button class="primary" id="run">执行同步</button>
+        </div>
+        <div id="sync-out" class="out"></div>
+      </div>
+
+      <h1>活动库</h1>
+      <p class="hint">跨平台统一运动库。元数据常驻；原始文件按保留期清理。</p>
+      <div class="card">
+        <div class="row" style="margin-bottom:12px">
+          <input id="fq" placeholder="搜索名称 / ID" style="width:220px" />
+          <select id="fplatform" style="width:160px"></select>
+          <select id="fsport" style="width:140px">
+            <option value="">全部类型</option>
+            <option value="ride">骑行</option>
+            <option value="run">跑步</option>
+            <option value="swim">游泳</option>
+            <option value="hiking">徒步</option>
+            <option value="other">其他</option>
+          </select>
+          <input id="fsince" type="date" style="width:150px" />
+          <input id="funtil" type="date" style="width:150px" />
+          <button id="fgo">筛选</button>
+          <button id="freset">重置</button>
+          <div class="spacer" style="flex:1"></div>
+          <span id="ftotal" class="badge"></span>
+        </div>
+        <div id="acts"></div>
+      </div>
+
       <h1>平台</h1>
       <p class="hint">能力矩阵由各适配器的 manifest 声明渲染。点击平台卡片可连接账号。</p>
       <div class="grid" id="platforms"></div>
 
-      <h2>已连接账号</h2>
-      <p class="hint">凭证经 AES-256-GCM 加密后存于本地 SQLite，API 永不返回明文。</p>
+      <h1>已连接账号</h1>
       <div class="card" id="conns"></div>
 
-      <h2>活动</h2>
-      <p class="hint">统一运动库（待同步引擎接入后填充）。</p>
-      <div class="card"><div class="empty">暂无活动 —— 同步引擎尚未接入</div></div>
+      <h1>运行事件</h1>
+      <div class="card" id="events"></div>
     </div>`;
 
-  $('#logout').onclick = async () => {
-    await api('/auth/logout', { method: 'POST' });
-    renderLogin();
+  $('#logout').onclick = async () => { await api('/auth/logout', { method: 'POST' }); renderLogin(); };
+  $('#dry').onclick = () => runSync(true);
+  $('#run').onclick = () => runSync(false);
+  $('#fgo').onclick = () => { readFilters(); loadActivities(); };
+  $('#freset').onclick = () => {
+    $('#fq').value = ''; $('#fplatform').value = ''; $('#fsport').value = '';
+    $('#fsince').value = ''; $('#funtil').value = '';
+    state.filters = { q: '', platform: '', sport: '', since: '', until: '' };
+    loadActivities();
   };
+  $$('#fq,#fplatform,#fsport,#fsince,#funtil').forEach((el) => {
+    el.onkeydown = (e) => { if (e.key === 'Enter') { readFilters(); loadActivities(); } };
+  });
 
   loadHealth();
   renderPlatforms();
   loadConnections();
+  loadActivities();
+  loadEvents();
+  setInterval(loadEvents, 8000);
 }
 
+function readFilters() {
+  state.filters = {
+    q: $('#fq').value.trim(),
+    platform: $('#fplatform').value,
+    sport: $('#fsport').value,
+    since: $('#fsince').value ? new Date($('#fsince').value + 'T00:00:00').toISOString() : '',
+    until: $('#funtil').value ? new Date($('#funtil').value + 'T23:59:59').toISOString() : '',
+  };
+}
+
+/* ── 同步 ─────────────────────────────────────────────── */
+function renderSyncChips() {
+  const src = $('#src-list'), dst = $('#dst-list');
+  const connected = new Set(state.connections.filter((c) => c.status === 'active').map((c) => c.platformId));
+  src.innerHTML = state.platforms
+    .filter((p) => p.capabilities.download)
+    .map((p) => `<label class="chip"><input type="checkbox" value="${esc(p.id)}" ${connected.has(p.id) ? '' : 'disabled'}/> ${esc(p.displayName)}${connected.has(p.id) ? '' : ' <span class="muted">(未连接)</span>'}</label>`)
+    .join('') || '<span class="muted">没有可用的来源平台</span>';
+  dst.innerHTML = state.platforms
+    .filter((p) => p.capabilities.upload)
+    .map((p) => `<label class="chip"><input type="checkbox" value="${esc(p.id)}" ${connected.has(p.id) ? '' : 'disabled'}/> ${esc(p.displayName)}${connected.has(p.id) ? '' : ' <span class="muted">(未连接)</span>'}</label>`)
+    .join('') || '<span class="muted">没有可上传的目标平台</span>';
+}
+
+async function runSync(dry) {
+  if (state.busy) return;
+  const sources = $$('#src-list input:checked').map((i) => i.value);
+  const targets = $$('#dst-list input:checked').map((i) => i.value);
+  const out = $('#sync-out');
+  if (!sources.length) { out.innerHTML = '<div class="err">请至少选择一个来源平台</div>'; return; }
+
+  state.busy = true;
+  $('#run').disabled = true; $('#dry').disabled = true;
+  out.innerHTML = '<div class="muted">运行中…</div>';
+  try {
+    const data = await api('/sync/run', {
+      method: 'POST',
+      body: {
+        sourcePlatforms: sources,
+        targetPlatforms: targets,
+        dryRun: dry,
+        policy: { maxItemsPerRun: Number($('#max-items').value) || 50 },
+      },
+    });
+    const s = data.summary;
+    out.innerHTML = `
+      <div class="ok-msg">${dry ? '预览完成（未写入任何数据）' : '同步完成'}</div>
+      <table><thead><tr><th>平台</th><th>发现</th><th>下载</th><th>跳过</th><th>失败</th><th>上传</th><th>上传失败</th></tr></thead>
+      <tbody>${Object.entries(s.perPlatform).map(([k, v]) => `<tr>
+        <td>${esc(k)}${v.error ? ' <span class="tag warn">' + esc(v.error) + '</span>' : ''}</td>
+        <td>${v.discovered}</td><td>${v.downloaded}</td><td>${v.skipped}</td>
+        <td>${v.failed}</td><td>${v.uploaded}</td><td>${v.uploadFailed}</td></tr>`).join('')}</tbody></table>
+      ${s.errors.length ? '<div class="err" style="margin-top:10px">' + s.errors.map(esc).join('<br/>') + '</div>' : ''}
+      <div class="muted" style="margin-top:8px">runId: ${esc(s.runId)}</div>`;
+    if (!dry) { loadActivities(); loadEvents(); }
+  } catch (e) {
+    out.innerHTML = '<div class="err">' + esc(e.message) + '</div>';
+  } finally {
+    state.busy = false;
+    $('#run').disabled = false; $('#dry').disabled = false;
+  }
+}
+
+/* ── 活动库 ───────────────────────────────────────────── */
+async function loadActivities() {
+  const p = new URLSearchParams();
+  if (state.filters.q) p.set('q', state.filters.q);
+  if (state.filters.platform) p.set('platform', state.filters.platform);
+  if (state.filters.sport) p.set('sport', state.filters.sport);
+  if (state.filters.since) p.set('since', state.filters.since);
+  if (state.filters.until) p.set('until', state.filters.until);
+  p.set('limit', '200');
+
+  const box = $('#acts');
+  try {
+    const data = await api('/activities?' + p.toString());
+    state.activities = data.activities || [];
+    state.total = data.total || 0;
+  } catch {
+    state.activities = [];
+    state.total = 0;
+  }
+
+  $('#ftotal').textContent = state.total + ' 条';
+
+  const sel = $('#fplatform');
+  if (sel && sel.options.length <= 1) {
+    sel.innerHTML = '<option value="">全部来源</option>' +
+      state.platforms.map((p2) => `<option value="${esc(p2.id)}">${esc(p2.displayName)}</option>`).join('');
+  }
+
+  if (!state.activities.length) {
+    box.innerHTML = '<div class="empty">还没有活动 —— 先连接平台账号，再执行一次同步</div>';
+    return;
+  }
+
+  box.innerHTML = '<table><thead><tr><th>时间</th><th>名称</th><th>来源</th><th>距离</th><th>时长</th><th>类型</th><th>指标</th><th>已同步</th><th></th></tr></thead><tbody>' +
+    state.activities.map((a) => {
+      const m = a.metrics || {};
+      const metricTxt = [
+        m.avgHeartRate ? m.avgHeartRate + 'bpm' : '',
+        m.avgPower ? m.avgPower + 'W' : '',
+        m.avgCadence ? m.avgCadence + 'rpm' : '',
+      ].filter(Boolean).join(' · ');
+      const flags = [];
+      if (a.flags?.timezoneAdjusted) flags.push('时区已修正');
+      if (a.flags?.coordinatesAdjusted) flags.push('坐标已转换');
+      if (a.flags?.coordinateSystemOriginal && a.flags.coordinateSystemOriginal !== 'unknown' && a.flags.coordinateSystemOriginal !== 'wgs84') {
+        flags.push('源坐标系 ' + a.flags.coordinateSystemOriginal);
+      }
+      return `<tr>
+        <td style="white-space:nowrap">${esc(fmtTime(a.startTime))}</td>
+        <td>${esc(a.name)}${flags.length ? '<br/><span class="muted" style="font-size:11px">' + esc(flags.join(' · ')) + '</span>' : ''}</td>
+        <td><span class="tag">${esc(a.source.platformId)}</span></td>
+        <td>${esc(fmtDist(a.distanceMeters))}</td>
+        <td>${esc(fmtDur(a.durationSec))}</td>
+        <td>${esc(a.sportType)}</td>
+        <td style="font-size:12px;color:var(--muted)">${esc(metricTxt || '—')}</td>
+        <td>${(a.syncedTargets || []).map((t) => '<span class="tag yes">' + esc(t) + '</span>').join(' ') || '<span class="muted">—</span>'}</td>
+        <td class="row end">
+          <a class="btn-link" href="/api/v1/activities/${esc(a.id)}/file">下载</a>
+          <button data-del="${esc(a.id)}">删除</button>
+        </td>
+      </tr>`;
+    }).join('') + '</tbody></table>';
+
+  $$('button[data-del]').forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm('删除这条本地活动副本？')) return;
+      await api('/activities/' + b.dataset.del, { method: 'DELETE' });
+      loadActivities();
+    };
+  });
+}
+
+/* ── 事件 ─────────────────────────────────────────────── */
+async function loadEvents() {
+  const box = $('#events');
+  if (!box) return;
+  try {
+    const data = await api('/events?limit=30');
+    state.events = data.events || [];
+  } catch {
+    state.events = [];
+  }
+  if (!state.events.length) {
+    box.innerHTML = '<div class="empty">暂无事件</div>';
+    return;
+  }
+  box.innerHTML = '<table><thead><tr><th>时间</th><th>级别</th><th>分类</th><th>平台</th><th>消息</th></tr></thead><tbody>' +
+    state.events.map((e) => `<tr>
+      <td style="white-space:nowrap;font-size:12px">${esc(fmtTime(e.created_at))}</td>
+      <td><span class="badge ${e.level === 'error' ? 'danger' : e.level === 'warn' ? 'warn' : 'ok'}">${esc(e.level)}</span></td>
+      <td>${esc(e.category)}</td>
+      <td>${esc(e.platform_id || '—')}</td>
+      <td>${esc(e.message)}</td>
+    </tr>`).join('') + '</tbody></table>';
+}
+
+/* ── 平台 / 连接 ──────────────────────────────────────── */
 async function loadHealth() {
   try {
     const res = await fetch('/health');
@@ -104,20 +332,19 @@ async function loadHealth() {
     el.textContent = 'v' + h.version + ' · db ' + (h.db ? 'ok' : 'down') + ' · ' + h.fileStore;
     el.className = 'badge ' + (h.db ? 'ok' : 'danger');
   } catch {
-    $('#health').textContent = '服务异常';
-    $('#health').className = 'badge danger';
+    const el = $('#health');
+    el.textContent = '服务异常';
+    el.className = 'badge danger';
   }
 }
 
 function platformCard(p) {
   const c = p.capabilities;
-  const accessTag =
-    p.access === 'official'
-      ? '<span class="tag yes">官方 API</span>'
-      : p.access === 'reverse-engineered'
-        ? '<span class="tag warn">逆向接口</span>'
-        : '<span class="tag">' + esc(p.access) + '</span>';
-
+  const accessTag = p.access === 'official'
+    ? '<span class="tag yes">官方 API</span>'
+    : p.access === 'reverse-engineered'
+      ? '<span class="tag warn">逆向接口</span>'
+      : '<span class="tag">' + esc(p.access) + '</span>';
   return `
     <div class="card" data-pid="${esc(p.id)}">
       <h3>${esc(p.displayName)}
@@ -139,9 +366,7 @@ function platformCard(p) {
           <input name="account" autocomplete="username" required />
           <label>密码</label>
           <input name="password" type="password" autocomplete="current-password" required />
-          <div class="row end" style="margin-top:12px">
-            <button class="primary" type="submit">连接</button>
-          </div>
+          <div class="row end" style="margin-top:12px"><button class="primary" type="submit">连接</button></div>
           <div class="ok-msg"></div>
           <div class="err"></div>
         </form>
@@ -155,32 +380,25 @@ function renderPlatforms() {
   $$('.conn-form').forEach((form) => {
     form.onsubmit = async (e) => {
       e.preventDefault();
-      const card = form.closest('.card');
-      const pid = card.dataset.pid;
+      const pid = form.closest('.card').dataset.pid;
       const ok = form.querySelector('.ok-msg');
       const err = form.querySelector('.err');
-      ok.textContent = '';
-      err.textContent = '';
+      ok.textContent = ''; err.textContent = '';
       const btn = form.querySelector('button');
-      btn.disabled = true;
-      btn.textContent = '连接中…';
+      btn.disabled = true; btn.textContent = '连接中…';
       try {
         const fd = new FormData(form);
         await api('/connections/' + pid, {
           method: 'POST',
-          body: {
-            account: fd.get('account'),
-            password: fd.get('password'),
-          },
+          body: { account: fd.get('account'), password: fd.get('password') },
         });
         ok.textContent = '连接成功';
         form.reset();
         await loadConnections();
       } catch (e2) {
-        err.textContent = e2.message;
+        err.textContent = e2.message + (e2.payload?.retryAfterMinutes ? '（约 ' + e2.payload.retryAfterMinutes + ' 分钟后可重试）' : '');
       } finally {
-        btn.disabled = false;
-        btn.textContent = '连接';
+        btn.disabled = false; btn.textContent = '连接';
       }
     };
   });
@@ -188,31 +406,51 @@ function renderPlatforms() {
 
 async function loadConnections() {
   const box = $('#conns');
+  if (!box) return;
   try {
     const data = await api('/connections');
     state.connections = data.connections || [];
   } catch {
     state.connections = [];
   }
+  renderSyncChips();
   if (!state.connections.length) {
     box.innerHTML = '<div class="empty">还没有连接任何平台账号</div>';
     return;
   }
-  box.innerHTML =
-    '<table><thead><tr><th>平台</th><th>状态</th><th>最近校验</th><th>创建时间</th><th></th></tr></thead><tbody>' +
-    state.connections
-      .map(
-        (c) => `<tr>
-          <td>${esc(c.platformId)}</td>
-          <td><span class="badge ${c.status === 'active' ? 'ok' : 'warn'}">${esc(c.status)}</span></td>
-          <td>${esc(c.lastValidatedAt || '—')}</td>
-          <td>${esc(c.createdAt || '—')}</td>
-          <td class="row end"><button data-del="${esc(c.id)}">删除</button></td>
-        </tr>`,
-      )
-      .join('') +
-    '</tbody></table>';
+  box.innerHTML = '<table><thead><tr><th>平台</th><th>状态</th><th>最近校验</th><th>创建时间</th><th></th></tr></thead><tbody>' +
+    state.connections.map((c) => `<tr>
+      <td>${esc(c.platformId)}</td>
+      <td><span class="badge ${c.status === 'active' ? 'ok' : 'warn'}">${esc(c.status)}</span></td>
+      <td>${esc(c.lastValidatedAt || '—')}</td>
+      <td>${esc(c.createdAt || '—')}</td>
+      <td class="row end">
+        <button data-val="${esc(c.id)}">校验</button>
+        <button data-rel="${esc(c.id)}">重新登录</button>
+        <button data-del="${esc(c.id)}">删除</button>
+      </td></tr>`).join('') + '</tbody></table>';
 
+  $$('button[data-val]').forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true; b.textContent = '校验中…';
+      try {
+        const r = await api('/connections/' + b.dataset.val + '/validate', { method: 'POST' });
+        alert(r.ok ? '凭证有效' : '凭证无效：' + (r.reason || ''));
+        await loadConnections();
+      } catch (e) { alert(e.message); }
+      finally { b.disabled = false; b.textContent = '校验'; }
+    };
+  });
+  $$('button[data-rel]').forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true; b.textContent = '登录中…';
+      try {
+        await api('/connections/' + b.dataset.rel + '/relogin', { method: 'POST' });
+        await loadConnections();
+      } catch (e) { alert(e.message); }
+      finally { b.disabled = false; b.textContent = '重新登录'; }
+    };
+  });
   $$('button[data-del]').forEach((b) => {
     b.onclick = async () => {
       if (!confirm('删除该平台凭证？')) return;
@@ -237,6 +475,7 @@ async function boot() {
     state.platforms = [];
   }
   renderApp();
+  await loadConnections();
 }
 
 boot();

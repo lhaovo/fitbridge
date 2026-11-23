@@ -1,5 +1,7 @@
 import type { CoordinateSystem, SportType } from '@fitbridge/fitkit';
 
+export type { SportType };
+
 /** 活动来源身份（幂等键的一半） */
 export interface SourceRef {
   platformId: string;

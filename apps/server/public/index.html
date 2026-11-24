@@ -15,9 +15,11 @@
 -->
 <script>
 try {
-  var m = document.querySelector('meta[name="color-scheme"]');
-  m.content = localStorage.getItem('color-scheme') || 'light';
-  document.documentElement.dataset.theme = m.content;
+  var stored = localStorage.getItem('color-scheme');
+  // 只认 light / dark，脏数据一律当默认（浅色）
+  var t = (stored === 'dark' || stored === 'light') ? stored : 'light';
+  document.querySelector('meta[name="color-scheme"]').content = t;
+  document.documentElement.dataset.theme = t;
 } catch (e) { /* 隐私模式等场景：localStorage 可能不可用，忽略即可 */ }
 </script>
 <meta name="theme-color" content="#f4f6fa" />

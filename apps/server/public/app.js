@@ -167,7 +167,8 @@ function toast(message, level = 'info') {
 const THEME_KEY = 'color-scheme';
 
 function currentTheme() {
-  return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+  const t = document.documentElement.dataset.theme;
+  return t === 'dark' ? 'dark' : 'light';
 }
 
 function applyTheme(theme, persist) {

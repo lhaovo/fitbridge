@@ -17,7 +17,7 @@
 | 0.6 Adapter `otm` | ⚠️ 离线验证 | 协议实现完成 + 8 个回归测试（未用真实账号验证） |
 | 0.7 Adapter `mywhoosh` | ⚠️ 离线验证 | 协议实现完成 + 5 个回归测试（未用真实账号验证） |
 | 0.8 同步引擎 | ✅ | 全流程 + **真实账号验证通过：迈金 20 条 + MyWhoosh 7 条，零失败** |
-| 0.9 Web 控制台 | ✅ v2 | 同步编排(预览/执行) + 活动库(筛选/详情/下载) + 平台矩阵 + 事件流（已截图验证） |
+| 0.9 Web 控制台 | ✅ v2 | 同步编排(模式/预览/全量重拉) + 活动库(筛选/下载) + **本地库状态面板** + 平台矩阵 + 事件流（已截图验证） |
 | 0.10 导出 + 备份 + 部署文档 | ⚠️ 部分 | backup/restore 已适配 SQLite；「导出全部」功能未做 |
 
 **下一步（按风险从高到低）**：
@@ -51,6 +51,30 @@
 
 原用 WAL 模式，导致主库文件只有 4KB、数据全在 `-wal` 里（单独拷 `.db` 会得到空库）。
 已改为 **journal_mode=DELETE**：单文件 `fitbridge.db`，数据全在里面，备份/拷贝只需一个文件。
+
+### 去重验证（2026-11-24 实测）
+
+重置增量游标但保留数据后重跑：
+
+@@@
+发现 27 | 新增 0 | 跳过 27（去重命中）| 失败 0
+otm      {discovered: 20, downloaded: 0, skipped: 20}
+mywhoosh {discovered:  7, downloaded: 0, skipped:  7}
+活动数仍为 27（唯一组合 27，无重复）；blob 文件数未增长（内容寻址去重，27 个文件共用 21 个 blob）
+@@@
+
+数据库级幂等键（UNIQUE 约束强制，插入重复会被直接拒绝）：
+
+@@@sql
+UNIQUE (user_id, source_platform, source_activity_id)
+→ UNIQUE constraint failed: activities.user_id, activities.source_platform, activities.source_activity_id
+@@@
+
+### 增量窗口的正确表现
+
+上次同步后隔 3 天再点同步 → **「发现 0 条」是正常的**：
+增量只查「上次成功时间 − 24h 回看窗口」内的新活动。
+所以 UI 加了「全量重拉」开关，并在面板上写明了这个行为。
 
 ### 其它实测结论
 
@@ -150,6 +174,7 @@ fitbridge/
 | GET | `/api/v1/activities/:id/file` | 下载原始文件 |
 | DELETE | `/api/v1/activities/:id` | 删除本地副本（含 blob） |
 | GET | `/api/v1/events` | 事件历史 |
+| GET | `/api/v1/storage/stats` | 本地库状态（DB 大小/表数/文件数/按平台统计/保留策略） |
 | GET | `/` | **Web 控制台**（登录 / 平台矩阵 / 连接账号） |
 
 ---

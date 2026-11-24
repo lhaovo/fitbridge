@@ -535,6 +535,21 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     return { ok: true };
   });
 
+  /**
+   * 本地库状态（数据库/文件/去重统计/保留策略）。
+   */
+  app.get('/api/v1/storage/stats', async () => {
+    const { collectStorageStats } = await import('./lib/storage-stats.js');
+    return {
+      stats: await collectStorageStats(deps.db, {
+        dbFile: config.databaseFile,
+        blobDir: config.blobDir,
+        fileRetentionDays: config.fileRetentionDays,
+        derivedTtlDays: config.derivedTtlDays,
+      }),
+    };
+  });
+
   /** 事件历史 */
   app.get('/api/v1/events', async (req) => {
     const q = req.query as Record<string, string | undefined>;

@@ -93,16 +93,32 @@ function renderApp() {
             <div id="src-list" class="chips"></div>
           </div>
           <div style="flex:1;min-width:260px">
-            <label>目标平台（可多选）</label>
-            <div id="dst-list" class="chips"></div>
+            <label>同步模式</label>
+            <div class="chips" id="mode-list">
+              <label class="chip"><input type="radio" name="sync-mode" value="local" checked /> 仅同步到本地库</label>
+              <label class="chip"><input type="radio" name="sync-mode" value="upload" /> 同时上传到目标平台</label>
+            </div>
           </div>
+        </div>
+        <div id="dst-wrap" style="display:none;margin-top:14px">
+          <label>目标平台（可多选，仅在「同时上传」模式下生效）</label>
+          <div id="dst-list" class="chips"></div>
         </div>
         <div class="row" style="margin-top:14px">
           <label style="margin:0">条数上限</label>
           <input id="max-items" type="number" value="50" min="1" max="500" style="width:90px" />
+          <label class="chip" style="margin-left:6px"><input type="checkbox" id="force" /> 全量重拉</label>
           <div class="spacer" style="flex:1"></div>
           <button id="dry">预览（不写入）</button>
-          <button class="primary" id="run">执行同步</button>
+          <button class="primary" id="run">同步到本地库</button>
+        </div>
+        <div class="muted" style="margin-top:10px;font-size:12.5px">
+          <b>增量</b>：默认只查「上次成功同步时间 − 24 小时回看窗口」内的新活动（平台列表是时间倒序，遇到更早的就停止翻页）。
+          所以平时点同步可能显示「发现 0 条」—— 那就是没有新活动，属正常。需要重新拉全部历史请勾选「全量重拉」。
+        </div>
+        <div class="muted" style="margin-top:6px;font-size:12.5px">
+          <b>去重三层</b>：① 来源唯一键（用户 + 平台 + 活动ID，数据库 UNIQUE 约束强制）② 目标侧 external_id 幂等键
+          ③ 上传前目标列表软存在检查。<b>已同步过的活动会被自动跳过，不会重复下载或重复上传；文件按内容哈希去重存储。</b>
         </div>
         <div id="sync-out" class="out"></div>
       </div>
@@ -131,6 +147,10 @@ function renderApp() {
         <div id="acts"></div>
       </div>
 
+      <h1>本地库</h1>
+      <p class="hint">元数据常驻 SQLite；原始文件按保留期清理（到期删文件、保留账本）。</p>
+      <div class="card" id="storage"></div>
+
       <h1>平台</h1>
       <p class="hint">能力矩阵由各适配器的 manifest 声明渲染。点击平台卡片可连接账号。</p>
       <div class="grid" id="platforms"></div>
@@ -145,6 +165,10 @@ function renderApp() {
   $('#logout').onclick = async () => { await api('/auth/logout', { method: 'POST' }); renderLogin(); };
   $('#dry').onclick = () => runSync(true);
   $('#run').onclick = () => runSync(false);
+  $$('input[name=sync-mode]').forEach((r) => {
+    r.onchange = () => applySyncMode();
+  });
+  applySyncMode();
   $('#fgo').onclick = () => { readFilters(); loadActivities(); };
   $('#freset').onclick = () => {
     $('#fq').value = ''; $('#fplatform').value = ''; $('#fsport').value = '';
@@ -161,7 +185,24 @@ function renderApp() {
   loadConnections();
   loadActivities();
   loadEvents();
+  loadStorage();
   setInterval(loadEvents, 8000);
+  setInterval(loadStorage, 30000);
+}
+
+/** 同步模式：仅本地库 / 同时上传 */
+function syncMode() {
+  const el = document.querySelector('input[name=sync-mode]:checked');
+  return el ? el.value : 'local';
+}
+
+function applySyncMode() {
+  const mode = syncMode();
+  const isUpload = mode === 'upload';
+  const wrap = $('#dst-wrap');
+  if (wrap) wrap.style.display = isUpload ? 'block' : 'none';
+  const run = $('#run');
+  if (run) run.textContent = isUpload ? '同步并上传到目标平台' : '同步到本地库';
 }
 
 function readFilters() {
@@ -191,9 +232,17 @@ function renderSyncChips() {
 async function runSync(dry) {
   if (state.busy) return;
   const sources = $$('#src-list input:checked').map((i) => i.value);
-  const targets = $$('#dst-list input:checked').map((i) => i.value);
+  // 仅本地库模式 → 不传目标平台
+  const targets = syncMode() === 'upload'
+    ? $$('#dst-list input:checked').map((i) => i.value)
+    : [];
   const out = $('#sync-out');
+  const force = $('#force').checked;
   if (!sources.length) { out.innerHTML = '<div class="err">请至少选择一个来源平台</div>'; return; }
+  if (syncMode() === 'upload' && !targets.length) {
+    out.innerHTML = '<div class="err">请至少选择一个目标平台（或切回「仅同步到本地库」）</div>';
+    return;
+  }
 
   state.busy = true;
   $('#run').disabled = true; $('#dry').disabled = true;
@@ -205,20 +254,34 @@ async function runSync(dry) {
         sourcePlatforms: sources,
         targetPlatforms: targets,
         dryRun: dry,
-        policy: { maxItemsPerRun: Number($('#max-items').value) || 50 },
+        policy: {
+          maxItemsPerRun: Number($('#max-items').value) || 50,
+          // 全量重拉：忽略增量窗口，重新拉全部历史（去重仍生效，不会产生重复）
+          incremental: !$('#force').checked,
+          lookbackHours: $('#force').checked ? 24 * 365 * 10 : 24,
+        },
       },
     });
     const s = data.summary;
+    const dupSkipped = Object.values(s.perPlatform).reduce((a, v) => a + v.skipped, 0);
     out.innerHTML = `
       <div class="ok-msg">${dry ? '预览完成（未写入任何数据）' : '同步完成'}</div>
-      <table><thead><tr><th>平台</th><th>发现</th><th>下载</th><th>跳过</th><th>失败</th><th>上传</th><th>上传失败</th></tr></thead>
+      <div class="row" style="margin:8px 0">
+        <span class="tag">发现 ${s.discovered}</span>
+        <span class="tag yes">新增 ${s.downloaded}</span>
+        <span class="tag ${dupSkipped ? 'warn' : ''}">跳过 ${s.skipped}${dupSkipped ? '（已存在·去重命中）' : ''}</span>
+        ${s.failed ? `<span class="tag no">失败 ${s.failed}</span>` : ''}
+        ${s.uploaded ? `<span class="tag yes">上传 ${s.uploaded}</span>` : ''}
+        ${s.uploadFailed ? `<span class="tag no">上传失败 ${s.uploadFailed}</span>` : ''}
+      </div>
+      <table><thead><tr><th>平台</th><th>发现</th><th>新增</th><th>跳过(去重)</th><th>失败</th><th>上传</th><th>上传失败</th></tr></thead>
       <tbody>${Object.entries(s.perPlatform).map(([k, v]) => `<tr>
         <td>${esc(k)}${v.error ? ' <span class="tag warn">' + esc(v.error) + '</span>' : ''}</td>
         <td>${v.discovered}</td><td>${v.downloaded}</td><td>${v.skipped}</td>
         <td>${v.failed}</td><td>${v.uploaded}</td><td>${v.uploadFailed}</td></tr>`).join('')}</tbody></table>
       ${s.errors.length ? '<div class="err" style="margin-top:10px">' + s.errors.map(esc).join('<br/>') + '</div>' : ''}
       <div class="muted" style="margin-top:8px">runId: ${esc(s.runId)}</div>`;
-    if (!dry) { loadActivities(); loadEvents(); }
+    if (!dry) { loadActivities(); loadEvents(); loadStorage(); }
   } catch (e) {
     out.innerHTML = '<div class="err">' + esc(e.message) + '</div>';
   } finally {
@@ -297,6 +360,52 @@ async function loadActivities() {
       loadActivities();
     };
   });
+}
+
+/* ── 本地库状态 ───────────────────────────────────────── */
+async function loadStorage() {
+  const box = $('#storage');
+  if (!box) return;
+  let st;
+  try {
+    st = (await api('/storage/stats')).stats;
+  } catch {
+    box.innerHTML = '<div class="empty">无法读取本地库状态</div>';
+    return;
+  }
+  const kb = (n) => (n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB');
+
+  box.innerHTML = `
+    <div class="row" style="gap:20px">
+      <div style="flex:1;min-width:200px">
+        <div class="meta">数据库</div>
+        <div><code>${esc(st.database.path)}</code></div>
+        <div class="muted" style="font-size:12px;margin-top:4px">
+          ${kb(st.database.sizeBytes)} · ${st.database.tables} 张表 · journal=${esc(st.database.journalMode)}
+        </div>
+      </div>
+      <div style="flex:1;min-width:200px">
+        <div class="meta">原始文件</div>
+        <div><code>${esc(st.blobs.dir)}</code></div>
+        <div class="muted" style="font-size:12px;margin-top:4px">
+          ${st.blobs.fileCount} 个 · ${kb(st.blobs.sizeBytes)} · 保留 ${st.policy.fileRetentionDays} 天
+        </div>
+      </div>
+      <div style="flex:1;min-width:200px">
+        <div class="meta">去重与保留</div>
+        <div class="muted" style="font-size:12px">
+          活动 ${st.counts.activities} 条（有效文件 ${st.counts.activeFiles}，已清理 ${st.counts.expiredFiles}）<br/>
+          同步运行 ${st.counts.syncRuns} 次 · 凭证 ${st.counts.credentials} 个（加密）<br/>
+          派生文件缓存 ${st.policy.derivedTtlDays} 天
+        </div>
+      </div>
+    </div>
+    ${st.byPlatform.length ? `
+    <table style="margin-top:14px"><thead><tr><th>来源平台</th><th>活动</th><th>文件</th><th>占用</th></tr></thead><tbody>
+    ${st.byPlatform.map((b) => `<tr>
+      <td>${esc(b.platformId)}</td><td>${b.activities}</td><td>${b.files}</td><td>${kb(b.sizeBytes)}</td>
+    </tr>`).join('')}
+    </tbody></table>` : '<div class="empty">还没有数据</div>'}`;
 }
 
 /* ── 事件 ─────────────────────────────────────────────── */

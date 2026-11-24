@@ -26,6 +26,7 @@ FitBridge 是一个**自托管优先**的多平台运动数据同步服务。它
 | [docs/06-decisions.md](docs/06-decisions.md) | **最终决策记录 + 本地存储策略 + M0 范围（优先级最高）** |
 | [docs/07-m0-progress.md](docs/07-m0-progress.md) | M0 进度、实测结论、本地开发指南 |
 | [docs/08-activity-detail.md](docs/08-activity-detail.md) | **活动详情页**：轨迹图 / 指标曲线 / 跨平台叠加对比 + 这一轮挖出的真实数据 bug |
+| [docs/09-frontend-modernization.md](docs/09-frontend-modernization.md) | **前端现代化**：原生 `<dialog>` / 响应式表格 / 可访问性 / 安全响应头（附实测证据） |
 
 ## 状态
 
@@ -59,6 +60,7 @@ M0  骨架 + fitkit(只读解析) + 迈金OTM + MyWhoosh + 本地统一运动库
 | Web 控制台 v2（同步 / 活动库 / 本地库状态 / 平台矩阵 / 事件流） | OK 已可访问 |
 | 同步引擎编排（活动库填充） | OK 真实账号跑通：迈金 33 + MyWhoosh 7 条，零失败 |
 | **活动详情页**（轨迹图 / 指标曲线 / 跨平台叠加对比） | OK |
+| 前端现代化（原生 `<dialog>` / 响应式表格 / a11y / 安全头） | OK `legacy-scan` 0 发现 |
 
 ## 快速启动
 

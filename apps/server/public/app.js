@@ -1,4 +1,12 @@
-/* FitBridge 控制台 */
+/* FitBridge 控制台
+ *
+ * 约定：
+ *  - 静态骨架放在 index.html 的 <template> 里，这里用 cloneNode 取出，
+ *    不用 innerHTML 拼自己的可信标记
+ *  - 只有「数据驱动的列表」才用 innerHTML + esc()；
+ *    esc() 是唯一的转义入口，平台返回的所有字符串都必须过它
+ *  - 动态状态区域带 role="status" / aria-live，读屏用户能收到同步结果
+ */
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 
@@ -14,11 +22,16 @@ const state = {
 };
 
 async function api(path, opts = {}) {
-  const res = await fetch('/api/v1' + path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
+  // ★ 只有真有 body 时才声明 Content-Type: application/json。
+  //   否则 Fastify 会把「空 body + JSON content-type」判成非法 JSON → 400，
+  //   所有无 body 的 POST（校验 / 重新登录）都会挂掉。
+  const { body, headers, ...rest } = opts;
+  const init = { ...rest, headers: { ...(headers || {}) } };
+  if (body !== undefined && body !== null) {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch('/api/v1' + path, init);
   const text = await res.text();
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
@@ -44,123 +57,134 @@ const fmtDur = (s) => {
 };
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('zh-CN', { hour12: false }) : '—');
 
-/* ── 登录 ─────────────────────────────────────────────── */
+/* ── 模板 ───────────────────────────────────────────────── */
+function fromTemplate(id) {
+  const t = document.getElementById(id);
+  return t.content.cloneNode(true);
+}
+
+/* ── 通用对话框 / Toast ─────────────────────────────────── */
+/**
+ * 原生 <dialog> 的「点遮罩关闭」（closedby="any"）兼容回退。
+ *
+ * closedby 是较新的属性；老浏览器上它会被忽略，弹层只剩 Esc 可关。
+ * 这里用指针位置补上：按下和抬起都在弹层外才关。
+ * 注意判断的是指针坐标而不是 event.target —— <dialog> 自身的 padding
+ * 与子元素之间的空隙也会是 target，按 target 判断会误关。
+ */
+function installLightDismiss(dialog) {
+  if ('closedBy' in HTMLDialogElement.prototype) return;
+  const outside = (e, dlg) => {
+    const r = dlg.getBoundingClientRect();
+    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+  };
+  let pressedOutside = false;
+  dialog.addEventListener('pointerdown', (e) => { pressedOutside = outside(e, dialog); });
+  dialog.addEventListener('pointerup', (e) => {
+    if (pressedOutside && outside(e, dialog)) dialog.close();
+  });
+}
+
+/** 通用确认弹层，替代原生 confirm() */
+let confirmDlg = null;
+function ensureConfirmDialog() {
+  if (confirmDlg) return confirmDlg;
+  const d = document.createElement('dialog');
+  d.id = 'fb-confirm';
+  d.className = 'modal modal-sm';
+  d.setAttribute('closedby', 'any');
+  d.setAttribute('aria-labelledby', 'fb-confirm-title');
+  d.innerHTML =
+    '<div class="modal-card">' +
+    '<div class="modal-head">' +
+    '<h2 class="modal-title" id="fb-confirm-title">请确认</h2>' +
+    '<button type="button" id="fb-confirm-x" autofocus>关闭</button>' +
+    '</div>' +
+    '<div class="modal-body"><p id="fb-confirm-text" style="margin:0"></p></div>' +
+    '<div class="modal-foot">' +
+    '<button type="button" id="fb-confirm-cancel">取消</button>' +
+    '<button type="button" id="fb-confirm-ok" class="primary">确定</button>' +
+    '</div>' +
+    '</div>';
+  document.body.appendChild(d);
+  installLightDismiss(d);
+  d.querySelector('#fb-confirm-x').onclick = () => d.close();
+  d.querySelector('#fb-confirm-cancel').onclick = () => d.close();
+  confirmDlg = d;
+  return d;
+}
+
+/**
+ * 询问确认。返回 Promise<boolean>。
+ * 关闭（Esc / 点遮罩 / 取消）都算「否」。
+ */
+function askConfirm(text, opts = {}) {
+  const d = ensureConfirmDialog();
+  d.querySelector('#fb-confirm-title').textContent = opts.title || '请确认';
+  d.querySelector('#fb-confirm-text').textContent = text;
+  const ok = d.querySelector('#fb-confirm-ok');
+  ok.textContent = opts.okText || '确定';
+  ok.className = opts.danger ? 'danger-btn' : 'primary';
+
+  return new Promise((resolve) => {
+    let answer = false;
+    const onOk = () => { answer = true; d.close(); };
+    ok.addEventListener('click', onOk, { once: true });
+    d.addEventListener('close', () => {
+      ok.removeEventListener('click', onOk);
+      resolve(answer);
+    }, { once: true });
+    if (!d.open) d.showModal();
+  });
+}
+
+/** 轻量通知，替代原生 alert()（alert 会阻塞整个事件循环） */
+function toast(message, level = 'info') {
+  let host = $('.toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.className = 'toast-host';
+    host.setAttribute('role', 'region');
+    host.setAttribute('aria-label', '通知');
+    document.body.appendChild(host);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast ' + level;
+  el.setAttribute('role', level === 'err' ? 'alert' : 'status');
+  el.textContent = message;
+  host.appendChild(el);
+  setTimeout(() => el.remove(), level === 'err' ? 9000 : 4000);
+}
+
+/* ── 登录 ───────────────────────────────────────────────── */
 function renderLogin(msg) {
-  document.body.innerHTML = `
-    <div class="login card">
-      <h3 style="margin-bottom:2px">FitBridge</h3>
-      <p class="hint" style="margin-bottom:14px">多平台运动数据同步 · 单用户自托管</p>
-      <label>管理员密码</label>
-      <input id="pwd" type="password" autocomplete="current-password" />
-      <div class="err" id="err"></div>
-      <div class="row end" style="margin-top:12px"><button class="primary" id="go">登录</button></div>
-    </div>`;
-  const submit = async () => {
-    $('#err').textContent = '';
-    $('#go').disabled = true;
+  const root = $('#app');
+  root.replaceChildren(fromTemplate('tpl-login'));
+  const form = $('#login-form');
+  const err = $('#err');
+
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    err.textContent = '';
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true;
     try {
       await api('/auth/login', { method: 'POST', body: { password: $('#pwd').value } });
       await boot();
-    } catch (e) {
-      $('#err').textContent = e.message;
-      $('#go').disabled = false;
+    } catch (e2) {
+      err.textContent = e2.message;
+      btn.disabled = false;
     }
   };
-  $('#go').onclick = submit;
-  $('#pwd').onkeydown = (e) => { if (e.key === 'Enter') submit(); };
+
   $('#pwd').focus();
-  if (msg) $('#err').textContent = msg;
+  if (msg) err.textContent = msg;
 }
 
-/* ── 主框架 ───────────────────────────────────────────── */
+/* ── 主框架 ─────────────────────────────────────────────── */
 function renderApp() {
-  document.body.innerHTML = `
-    <header class="top">
-      <div class="logo">Fit<span>Bridge</span></div>
-      <span class="badge" id="health">连接中…</span>
-      <div class="spacer"></div>
-      <span class="badge" id="mode">单用户 · 自托管</span>
-      <button id="logout">退出</button>
-    </header>
-    <div class="wrap">
-
-      <h1>同步</h1>
-      <p class="hint">选择来源与目标平台 → 先「预览」确认影响面，再执行。目标平台仅在已连接且支持上传时可选。</p>
-      <div class="card">
-        <div class="row" style="gap:16px;align-items:flex-start">
-          <div style="flex:1;min-width:260px">
-            <label>来源平台（可多选）</label>
-            <div id="src-list" class="chips"></div>
-          </div>
-          <div style="flex:1;min-width:260px">
-            <label>同步模式</label>
-            <div class="chips" id="mode-list">
-              <label class="chip"><input type="radio" name="sync-mode" value="local" checked /> 仅同步到本地库</label>
-              <label class="chip"><input type="radio" name="sync-mode" value="upload" /> 同时上传到目标平台</label>
-            </div>
-          </div>
-        </div>
-        <div id="dst-wrap" style="display:none;margin-top:14px">
-          <label>目标平台（可多选，仅在「同时上传」模式下生效）</label>
-          <div id="dst-list" class="chips"></div>
-        </div>
-        <div class="row" style="margin-top:14px">
-          <label style="margin:0">条数上限</label>
-          <input id="max-items" type="number" value="50" min="1" max="500" style="width:90px" />
-          <label class="chip" style="margin-left:6px"><input type="checkbox" id="force" /> 全量重拉</label>
-          <div class="spacer" style="flex:1"></div>
-          <button id="dry">预览（不写入）</button>
-          <button class="primary" id="run">同步到本地库</button>
-        </div>
-        <div class="muted" style="margin-top:10px;font-size:12.5px">
-          <b>增量</b>：默认只查「上次成功同步时间 − 24 小时回看窗口」内的新活动（平台列表是时间倒序，遇到更早的就停止翻页）。
-          所以平时点同步可能显示「发现 0 条」—— 那就是没有新活动，属正常。需要重新拉全部历史请勾选「全量重拉」。
-        </div>
-        <div class="muted" style="margin-top:6px;font-size:12.5px">
-          <b>去重三层</b>：① 来源唯一键（用户 + 平台 + 活动ID，数据库 UNIQUE 约束强制）② 目标侧 external_id 幂等键
-          ③ 上传前目标列表软存在检查。<b>已同步过的活动会被自动跳过，不会重复下载或重复上传；文件按内容哈希去重存储。</b>
-        </div>
-        <div id="sync-out" class="out"></div>
-      </div>
-
-      <h1>活动库</h1>
-      <p class="hint">跨平台统一运动库。元数据常驻；原始文件按保留期清理。</p>
-      <div class="card">
-        <div class="row" style="margin-bottom:12px">
-          <input id="fq" placeholder="搜索名称 / ID" style="width:220px" />
-          <select id="fplatform" style="width:160px"></select>
-          <select id="fsport" style="width:140px">
-            <option value="">全部类型</option>
-            <option value="ride">骑行</option>
-            <option value="run">跑步</option>
-            <option value="swim">游泳</option>
-            <option value="hiking">徒步</option>
-            <option value="other">其他</option>
-          </select>
-          <input id="fsince" type="date" style="width:150px" />
-          <input id="funtil" type="date" style="width:150px" />
-          <button id="fgo">筛选</button>
-          <button id="freset">重置</button>
-          <div class="spacer" style="flex:1"></div>
-          <span id="ftotal" class="badge"></span>
-        </div>
-        <div id="acts"></div>
-      </div>
-
-      <h1>本地库</h1>
-      <p class="hint">元数据常驻 SQLite；原始文件按保留期清理（到期删文件、保留账本）。</p>
-      <div class="card" id="storage"></div>
-
-      <h1>平台</h1>
-      <p class="hint">能力矩阵由各适配器的 manifest 声明渲染。点击平台卡片可连接账号。</p>
-      <div class="grid" id="platforms"></div>
-
-      <h1>已连接账号</h1>
-      <div class="card" id="conns"></div>
-
-      <h1>运行事件</h1>
-      <div class="card" id="events"></div>
-    </div>`;
+  const root = $('#app');
+  root.replaceChildren(fromTemplate('tpl-app'));
 
   $('#logout').onclick = async () => { await api('/auth/logout', { method: 'POST' }); renderLogin(); };
   $('#dry').onclick = () => runSync(true);
@@ -169,16 +193,15 @@ function renderApp() {
     r.onchange = () => applySyncMode();
   });
   applySyncMode();
-  $('#fgo').onclick = () => { readFilters(); loadActivities(); };
+
+  // 筛选：走原生 form，Enter 提交由浏览器处理（输入法选词不会误触发）
+  $('#filter-form').onsubmit = (e) => { e.preventDefault(); readFilters(); loadActivities(); };
   $('#freset').onclick = () => {
     $('#fq').value = ''; $('#fplatform').value = ''; $('#fsport').value = '';
     $('#fsince').value = ''; $('#funtil').value = '';
     state.filters = { q: '', platform: '', sport: '', since: '', until: '' };
     loadActivities();
   };
-  $$('#fq,#fplatform,#fsport,#fsince,#funtil').forEach((el) => {
-    el.onkeydown = (e) => { if (e.key === 'Enter') { readFilters(); loadActivities(); } };
-  });
 
   loadHealth();
   renderPlatforms();
@@ -186,11 +209,31 @@ function renderApp() {
   loadActivities();
   loadEvents();
   loadStorage();
-  setInterval(loadEvents, 8000);
-  setInterval(loadStorage, 30000);
+  startPolling();
 }
 
-/** 同步模式：仅本地库 / 同时上传 */
+/* ── 轮询：页面不可见时暂停 ─────────────────────────────── */
+let pollTimers = [];
+function startPolling() {
+  stopPolling();
+  pollTimers.push(setInterval(loadEvents, 8000));
+  pollTimers.push(setInterval(loadStorage, 30000));
+}
+function stopPolling() {
+  pollTimers.forEach((t) => clearInterval(t));
+  pollTimers = [];
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopPolling();
+  } else {
+    loadEvents();
+    loadStorage();
+    startPolling();
+  }
+});
+
+/* ── 同步模式：仅本地库 / 同时上传 ─────────────────────── */
 function syncMode() {
   const el = document.querySelector('input[name=sync-mode]:checked');
   return el ? el.value : 'local';
@@ -215,9 +258,10 @@ function readFilters() {
   };
 }
 
-/* ── 同步 ─────────────────────────────────────────────── */
+/* ── 同步 ───────────────────────────────────────────────── */
 function renderSyncChips() {
   const src = $('#src-list'), dst = $('#dst-list');
+  if (!src || !dst) return;
   const connected = new Set(state.connections.filter((c) => c.status === 'active').map((c) => c.platformId));
   src.innerHTML = state.platforms
     .filter((p) => p.capabilities.download)
@@ -257,28 +301,26 @@ async function runSync(dry) {
         policy: {
           maxItemsPerRun: Number($('#max-items').value) || 50,
           // 全量重拉：忽略增量窗口，重新拉全部历史（去重仍生效，不会产生重复）
-          incremental: !$('#force').checked,
-          lookbackHours: $('#force').checked ? 24 * 365 * 10 : 24,
+          forceResync: force,
         },
       },
     });
     const s = data.summary;
-    const dupSkipped = Object.values(s.perPlatform).reduce((a, v) => a + v.skipped, 0);
+    const dupSkipped = s.skipped > 0;
     out.innerHTML = `
-      <div class="ok-msg">${dry ? '预览完成（未写入任何数据）' : '同步完成'}</div>
-      <div class="row" style="margin:8px 0">
+      <div class="tags">
+        <span class="tag ${dry ? 'warn' : 'yes'}">${dry ? '预览完成（未写入任何数据）' : '同步完成'}</span>
         <span class="tag">发现 ${s.discovered}</span>
-        <span class="tag yes">新增 ${s.downloaded}</span>
+        <span class="tag">新增 ${s.downloaded}</span>
         <span class="tag ${dupSkipped ? 'warn' : ''}">跳过 ${s.skipped}${dupSkipped ? '（已存在·去重命中）' : ''}</span>
-        ${s.failed ? `<span class="tag no">失败 ${s.failed}</span>` : ''}
-        ${s.uploaded ? `<span class="tag yes">上传 ${s.uploaded}</span>` : ''}
-        ${s.uploadFailed ? `<span class="tag no">上传失败 ${s.uploadFailed}</span>` : ''}
+        <span class="tag ${s.failed ? 'no' : ''}">失败 ${s.failed}</span>
+        <span class="tag ${s.uploaded ? 'yes' : ''}">上传 ${s.uploaded}</span>
+        <span class="tag ${s.uploadFailed ? 'no' : ''}">上传失败 ${s.uploadFailed}</span>
       </div>
-      <table><thead><tr><th>平台</th><th>发现</th><th>新增</th><th>跳过(去重)</th><th>失败</th><th>上传</th><th>上传失败</th></tr></thead>
+      <table><thead><tr><th scope="col">平台</th><th scope="col">发现</th><th scope="col">新增</th><th scope="col">跳过(去重)</th><th scope="col">失败</th><th scope="col">上传</th><th scope="col">上传失败</th></tr></thead>
       <tbody>${Object.entries(s.perPlatform).map(([k, v]) => `<tr>
         <td>${esc(k)}${v.error ? ' <span class="tag warn">' + esc(v.error) + '</span>' : ''}</td>
-        <td>${v.discovered}</td><td>${v.downloaded}</td><td>${v.skipped}</td>
-        <td>${v.failed}</td><td>${v.uploaded}</td><td>${v.uploadFailed}</td></tr>`).join('')}</tbody></table>
+        <td>${v.discovered}</td><td>${v.downloaded}</td><td>${v.skipped}</td><td>${v.failed}</td><td>${v.uploaded}</td><td>${v.uploadFailed}</td></tr>`).join('')}</tbody></table>
       ${s.errors.length ? '<div class="err" style="margin-top:10px">' + s.errors.map(esc).join('<br/>') + '</div>' : ''}
       <div class="muted" style="margin-top:8px">runId: ${esc(s.runId)}</div>`;
     if (!dry) { loadActivities(); loadEvents(); loadStorage(); }
@@ -290,7 +332,19 @@ async function runSync(dry) {
   }
 }
 
-/* ── 活动库 ───────────────────────────────────────────── */
+/* ── 表格工具 ───────────────────────────────────────────── */
+/**
+ * 表格统一包一层 .table-wrapper：
+ *  - overflow:auto 让宽表在自己的容器里横向滚动，而不是把整页撑宽
+ *  - tabindex="0" + role="region" 让键盘用户能滚动它
+ *  - container-type: inline-size 让 @container 查询能按表格自身宽度适配
+ */
+function tableWrap(tableHtml, label) {
+  return '<div class="table-wrapper" tabindex="0" role="region" aria-label="' + esc(label) + '">' +
+    tableHtml + '</div>';
+}
+
+/* ── 活动库 ─────────────────────────────────────────────── */
 async function loadActivities() {
   const p = new URLSearchParams();
   if (state.filters.q) p.set('q', state.filters.q);
@@ -301,6 +355,7 @@ async function loadActivities() {
   p.set('limit', '200');
 
   const box = $('#acts');
+  if (!box) return;
   try {
     const data = await api('/activities?' + p.toString());
     state.activities = data.activities || [];
@@ -323,21 +378,20 @@ async function loadActivities() {
     return;
   }
 
-  box.innerHTML = '<table><thead><tr><th>时间</th><th>名称</th><th>来源</th><th>距离</th><th>时长</th><th>类型</th><th>指标</th><th>已同步</th><th></th></tr></thead><tbody>' +
-    state.activities.map((a) => {
-      const m = a.metrics || {};
-      const metricTxt = [
-        m.avgHeartRate ? m.avgHeartRate + 'bpm' : '',
-        m.avgPower ? m.avgPower + 'W' : '',
-        m.avgCadence ? m.avgCadence + 'rpm' : '',
-      ].filter(Boolean).join(' · ');
-      const flags = [];
-      if (a.flags?.timezoneAdjusted) flags.push('时区已修正');
-      if (a.flags?.coordinatesAdjusted) flags.push('坐标已转换');
-      if (a.flags?.coordinateSystemOriginal && a.flags.coordinateSystemOriginal !== 'unknown' && a.flags.coordinateSystemOriginal !== 'wgs84') {
-        flags.push('源坐标系 ' + a.flags.coordinateSystemOriginal);
-      }
-      return `<tr>
+  const rows = state.activities.map((a) => {
+    const m = a.metrics || {};
+    const metricTxt = [
+      m.avgHeartRate ? m.avgHeartRate + 'bpm' : '',
+      m.avgPower ? m.avgPower + 'W' : '',
+      m.avgCadence ? m.avgCadence + 'rpm' : '',
+    ].filter(Boolean).join(' · ');
+    const flags = [];
+    if (a.flags?.timezoneAdjusted) flags.push('时区已修正');
+    if (a.flags?.coordinatesAdjusted) flags.push('坐标已转换');
+    if (a.flags?.coordinateSystemOriginal && a.flags.coordinateSystemOriginal !== 'unknown' && a.flags.coordinateSystemOriginal !== 'wgs84') {
+      flags.push('源坐标系 ' + a.flags.coordinateSystemOriginal);
+    }
+    return `<tr>
         <td style="white-space:nowrap">${esc(fmtTime(a.startTime))}</td>
         <td>${esc(a.name)}${flags.length ? '<br/><span class="muted" style="font-size:11px">' + esc(flags.join(' · ')) + '</span>' : ''}</td>
         <td><span class="tag">${esc(a.source.platformId)}</span></td>
@@ -347,27 +401,44 @@ async function loadActivities() {
         <td style="font-size:12px;color:var(--muted)">${esc(metricTxt || '—')}</td>
         <td>${(a.syncedTargets || []).map((t) => '<span class="tag yes">' + esc(t) + '</span>').join(' ') || '<span class="muted">—</span>'}</td>
         <td class="row end acts">
-          <button data-view="${esc(a.id)}">详情</button>
+          <button type="button" data-view="${esc(a.id)}">详情</button>
           <a class="btn-link" href="/api/v1/activities/${esc(a.id)}/file">下载</a>
-          <button data-del="${esc(a.id)}">删除</button>
+          <button type="button" data-del="${esc(a.id)}">删除</button>
         </td>
       </tr>`;
-    }).join('') + '</tbody></table>';
+  }).join('');
 
-  $$('button[data-view]').forEach((b) => {
+  box.innerHTML = tableWrap(
+    '<table class="acts-table">' +
+    '<caption class="visually-hidden">活动列表，共 ' + state.total + ' 条</caption>' +
+    '<thead><tr>' +
+    '<th scope="col">时间</th><th scope="col">名称</th><th scope="col">来源</th>' +
+    '<th scope="col">距离</th><th scope="col">时长</th><th scope="col">类型</th>' +
+    '<th scope="col">指标</th><th scope="col">已同步</th><th scope="col">操作</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table>',
+    '活动列表',
+  );
+
+  $$('#acts button[data-view]').forEach((b) => {
     b.onclick = () => openDetail(b.dataset.view);
   });
 
-  $$('button[data-del]').forEach((b) => {
+  $$('#acts button[data-del]').forEach((b) => {
     b.onclick = async () => {
-      if (!confirm('删除这条本地活动副本？')) return;
+      const ok = await askConfirm('删除这条本地活动副本？（已上传到其它平台的数据不受影响）', {
+        title: '删除本地副本',
+        okText: '删除',
+        danger: true,
+      });
+      if (!ok) return;
       await api('/activities/' + b.dataset.del, { method: 'DELETE' });
       loadActivities();
+      toast('已删除本地副本', 'ok');
     };
   });
 }
 
-/* ── 本地库状态 ───────────────────────────────────────── */
+/* ── 本地库状态 ─────────────────────────────────────────── */
 async function loadStorage() {
   const box = $('#storage');
   if (!box) return;
@@ -379,6 +450,17 @@ async function loadStorage() {
     return;
   }
   const kb = (n) => (n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB');
+
+  const byPlatform = st.byPlatform.length
+    ? tableWrap(
+      '<table><caption class="visually-hidden">按来源平台统计</caption>' +
+      '<thead><tr><th scope="col">来源平台</th><th scope="col">活动</th><th scope="col">文件</th><th scope="col">占用</th></tr></thead><tbody>' +
+      st.byPlatform.map((b) => `<tr>
+        <td>${esc(b.platformId)}</td><td>${b.activities}</td><td>${b.files}</td><td>${kb(b.sizeBytes)}</td>
+      </tr>`).join('') + '</tbody></table>',
+      '按平台统计',
+    )
+    : '<div class="empty">还没有数据</div>';
 
   box.innerHTML = `
     <div class="row" style="gap:20px">
@@ -405,15 +487,10 @@ async function loadStorage() {
         </div>
       </div>
     </div>
-    ${st.byPlatform.length ? `
-    <table style="margin-top:14px"><thead><tr><th>来源平台</th><th>活动</th><th>文件</th><th>占用</th></tr></thead><tbody>
-    ${st.byPlatform.map((b) => `<tr>
-      <td>${esc(b.platformId)}</td><td>${b.activities}</td><td>${b.files}</td><td>${kb(b.sizeBytes)}</td>
-    </tr>`).join('')}
-    </tbody></table>` : '<div class="empty">还没有数据</div>'}`;
+    ${byPlatform}`;
 }
 
-/* ── 事件 ─────────────────────────────────────────────── */
+/* ── 事件 ───────────────────────────────────────────────── */
 async function loadEvents() {
   const box = $('#events');
   if (!box) return;
@@ -427,17 +504,22 @@ async function loadEvents() {
     box.innerHTML = '<div class="empty">暂无事件</div>';
     return;
   }
-  box.innerHTML = '<table><thead><tr><th>时间</th><th>级别</th><th>分类</th><th>平台</th><th>消息</th></tr></thead><tbody>' +
+  box.innerHTML = tableWrap(
+    '<table><caption class="visually-hidden">最近 30 条运行事件</caption>' +
+    '<thead><tr><th scope="col">时间</th><th scope="col">级别</th><th scope="col">分类</th>' +
+    '<th scope="col">平台</th><th scope="col">消息</th></tr></thead><tbody>' +
     state.events.map((e) => `<tr>
       <td style="white-space:nowrap;font-size:12px">${esc(fmtTime(e.created_at))}</td>
       <td><span class="badge ${e.level === 'error' ? 'danger' : e.level === 'warn' ? 'warn' : 'ok'}">${esc(e.level)}</span></td>
       <td>${esc(e.category)}</td>
       <td>${esc(e.platform_id || '—')}</td>
       <td>${esc(e.message)}</td>
-    </tr>`).join('') + '</tbody></table>';
+    </tr>`).join('') + '</tbody></table>',
+    '运行事件',
+  );
 }
 
-/* ── 平台 / 连接 ──────────────────────────────────────── */
+/* ── 平台 / 连接 ────────────────────────────────────────── */
 async function loadHealth() {
   try {
     const res = await fetch('/health');
@@ -476,13 +558,13 @@ function platformCard(p) {
       <details>
         <summary style="cursor:pointer;color:var(--muted);font-size:13px">连接账号</summary>
         <form class="conn-form" style="margin-top:10px">
-          <label>账号</label>
-          <input name="account" autocomplete="username" required />
-          <label>密码</label>
-          <input name="password" type="password" autocomplete="current-password" required />
+          <label for="acc-${esc(p.id)}">账号</label>
+          <input id="acc-${esc(p.id)}" name="account" autocomplete="username" required />
+          <label for="pwd-${esc(p.id)}">密码</label>
+          <input id="pwd-${esc(p.id)}" name="password" type="password" autocomplete="current-password" required />
           <div class="row end" style="margin-top:12px"><button class="primary" type="submit">连接</button></div>
-          <div class="ok-msg"></div>
-          <div class="err"></div>
+          <div class="ok-msg" role="status" aria-live="polite"></div>
+          <div class="err" role="alert"></div>
         </form>
       </details>
     </div>`;
@@ -490,8 +572,9 @@ function platformCard(p) {
 
 function renderPlatforms() {
   const box = $('#platforms');
+  if (!box) return;
   box.innerHTML = state.platforms.map(platformCard).join('');
-  $$('.conn-form').forEach((form) => {
+  $$('#platforms .conn-form').forEach((form) => {
     form.onsubmit = async (e) => {
       e.preventDefault();
       const pid = form.closest('.card').dataset.pid;
@@ -509,6 +592,7 @@ function renderPlatforms() {
         ok.textContent = '连接成功';
         form.reset();
         await loadConnections();
+        toast('平台账号已连接', 'ok');
       } catch (e2) {
         err.textContent = e2.message + (e2.payload?.retryAfterMinutes ? '（约 ' + e2.payload.retryAfterMinutes + ' 分钟后可重试）' : '');
       } finally {
@@ -532,49 +616,61 @@ async function loadConnections() {
     box.innerHTML = '<div class="empty">还没有连接任何平台账号</div>';
     return;
   }
-  box.innerHTML = '<table><thead><tr><th>平台</th><th>状态</th><th>最近校验</th><th>创建时间</th><th></th></tr></thead><tbody>' +
+  box.innerHTML = tableWrap(
+    '<table><caption class="visually-hidden">已连接的平台账号</caption>' +
+    '<thead><tr><th scope="col">平台</th><th scope="col">状态</th><th scope="col">最近校验</th>' +
+    '<th scope="col">创建时间</th><th scope="col">操作</th></tr></thead><tbody>' +
     state.connections.map((c) => `<tr>
       <td>${esc(c.platformId)}</td>
       <td><span class="badge ${c.status === 'active' ? 'ok' : 'warn'}">${esc(c.status)}</span></td>
       <td>${esc(c.lastValidatedAt || '—')}</td>
       <td>${esc(c.createdAt || '—')}</td>
-      <td class="row end">
-        <button data-val="${esc(c.id)}">校验</button>
-        <button data-rel="${esc(c.id)}">重新登录</button>
-        <button data-del="${esc(c.id)}">删除</button>
-      </td></tr>`).join('') + '</tbody></table>';
+      <td class="row end acts">
+        <button type="button" data-val="${esc(c.id)}">校验</button>
+        <button type="button" data-rel="${esc(c.id)}">重新登录</button>
+        <button type="button" data-del="${esc(c.id)}">删除</button>
+      </td></tr>`).join('') + '</tbody></table>',
+    '已连接账号',
+  );
 
-  $$('button[data-val]').forEach((b) => {
+  $$('#conns button[data-val]').forEach((b) => {
     b.onclick = async () => {
       b.disabled = true; b.textContent = '校验中…';
       try {
         const r = await api('/connections/' + b.dataset.val + '/validate', { method: 'POST' });
-        alert(r.ok ? '凭证有效' : '凭证无效：' + (r.reason || ''));
+        toast(r.ok ? '凭证有效' : '凭证无效：' + (r.reason || ''), r.ok ? 'ok' : 'warn');
         await loadConnections();
-      } catch (e) { alert(e.message); }
+      } catch (e) { toast(e.message, 'err'); }
       finally { b.disabled = false; b.textContent = '校验'; }
     };
   });
-  $$('button[data-rel]').forEach((b) => {
+  $$('#conns button[data-rel]').forEach((b) => {
     b.onclick = async () => {
       b.disabled = true; b.textContent = '登录中…';
       try {
         await api('/connections/' + b.dataset.rel + '/relogin', { method: 'POST' });
+        toast('已重新登录', 'ok');
         await loadConnections();
-      } catch (e) { alert(e.message); }
+      } catch (e) { toast(e.message, 'err'); }
       finally { b.disabled = false; b.textContent = '重新登录'; }
     };
   });
-  $$('button[data-del]').forEach((b) => {
+  $$('#conns button[data-del]').forEach((b) => {
     b.onclick = async () => {
-      if (!confirm('删除该平台凭证？')) return;
+      const ok = await askConfirm('删除该平台凭证？之后需要重新输入账号密码才能同步。', {
+        title: '删除平台凭证',
+        okText: '删除',
+        danger: true,
+      });
+      if (!ok) return;
       await api('/connections/' + b.dataset.del, { method: 'DELETE' });
+      toast('凭证已删除', 'ok');
       await loadConnections();
     };
   });
 }
 
-/* ── 启动 ─────────────────────────────────────────────── */
+/* ── 启动 ───────────────────────────────────────────────── */
 async function boot() {
   try {
     const me = await api('/auth/me');

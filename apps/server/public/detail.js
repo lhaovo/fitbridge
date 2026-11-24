@@ -4,6 +4,10 @@
  *  - 轨迹投影：等距圆柱 + 按纬度 cos 修正，并保持等比例（x/y 同一 scale），
  *    这样叠加跨平台轨迹时形状不会被拉伸。
  *  - 指标图：min/max 归一化到 viewBox，坐标轴标签直接画在 SVG 里。
+ *
+ * 弹层用原生 <dialog> + showModal()：背景 inert、焦点收敛、top layer、
+ * ::backdrop、Esc 关闭、关闭后焦点回到触发按钮 —— 这些都由浏览器负责，
+ * 不需要手写 role="dialog" / aria-modal / 焦点陷阱 / Esc 监听。
  */
 
 const DETAIL = {
@@ -35,46 +39,52 @@ const dnum = (v, d = 0) =>
 const dkmh = (mps) =>
   mps === null || mps === undefined || !isFinite(mps) ? '—' : (mps * 3.6).toFixed(1);
 
-/* ── 弹层开关 ───────────────────────────────────────────── */
+/* ── 弹层 ───────────────────────────────────────────────── */
 /**
- * 弹层节点是「按需创建」的。
- * 原因：登录页 / 主框架都是用 document.body.innerHTML 整块替换渲染的，
- * 写在 index.html 里的静态节点会被冲掉，所以这里在第一次打开时重建。
+ * 弹层节点按需创建。
+ * 放在 document.body 下（不在 #app 里），所以主界面重渲染不会把它冲掉。
  */
 function ensureModal() {
   let m = document.getElementById('modal');
   if (m) return m;
-  m = document.createElement('div');
+  m = document.createElement('dialog');
   m.id = 'modal';
   m.className = 'modal';
-  m.hidden = true;
+  // 点遮罩关闭（Esc 由原生处理）
+  m.setAttribute('closedby', 'any');
+  // 原生 <dialog> 已经提供 role=dialog / aria-modal，
+  // 但**可访问名**要自己给：指向标题（<h2 id="modal-title">）
+  m.setAttribute('aria-labelledby', 'modal-title');
   m.innerHTML =
-    '<div class="modal-backdrop"></div>' +
-    '<div class="modal-card" role="dialog" aria-modal="true">' +
+    '<div class="modal-card">' +
     '<div class="modal-head">' +
-    '<div id="modal-title" class="modal-title"></div>' +
-    '<button id="modal-close">关闭</button>' +
+    '<div class="modal-title-wrap">' +
+    '<h2 class="modal-title" id="modal-title"></h2>' +
+    '<div class="modal-sub" id="modal-sub"></div>' +
+    '</div>' +
+    '<button type="button" id="modal-close" autofocus>关闭</button>' +
     '</div>' +
     '<div id="modal-body" class="modal-body"></div>' +
     '</div>';
   document.body.appendChild(m);
-  m.querySelector('#modal-close').onclick = detailClose;
-  m.querySelector('.modal-backdrop').onclick = detailClose;
+
+  m.querySelector('#modal-close').onclick = () => detailClose();
+  installLightDismiss(m);
+  // Esc 关闭是原生行为（close 事件）；这里只负责收尾
+  m.addEventListener('close', () => {
+    DETAIL.id = null;
+    DETAIL.overlays = [];
+  });
   return m;
 }
 
 function detailOpen() {
   const m = ensureModal();
-  m.hidden = false;
-  document.body.classList.add('modal-open');
+  if (!m.open) m.showModal();
 }
 function detailClose() {
   const m = document.getElementById('modal');
-  if (!m) return;
-  m.hidden = true;
-  document.body.classList.remove('modal-open');
-  DETAIL.id = null;
-  DETAIL.overlays = [];
+  if (m && m.open) m.close();
 }
 
 /* ── 加载 ───────────────────────────────────────────────── */
@@ -83,9 +93,11 @@ async function openDetail(id) {
   DETAIL.overlays = [];
   ensureModal();
   const title = document.getElementById('modal-title');
+  const sub = document.getElementById('modal-sub');
   const body = document.getElementById('modal-body');
-  title.innerHTML = '<span class="muted">加载中…</span>';
-  body.innerHTML = '';
+  title.textContent = '加载中…';
+  sub.textContent = '';
+  body.replaceChildren();
   detailOpen();
   try {
     const enc = encodeURIComponent(id);
@@ -112,16 +124,18 @@ function renderDetail() {
   const sum = (track && track.summary) || {};
   const m = a.metrics || {};
 
-  document.getElementById('modal-title').innerHTML =
-    '<div class="mtitle">' +
+  // 标题：活动名 + 平台（作为 dialog 的可访问名），其余信息放副标题
+  const title = document.getElementById('modal-title');
+  title.innerHTML =
+    '<span class="mtitle">' +
     '<span>' + esc(a.name || '(未命名活动)') + '</span>' +
     '<span class="tag">' + esc(a.source.platformId) + '</span>' +
-    '<span class="tag">' + esc(a.sportType) + '</span>' +
     (a.rawSportType && a.rawSportType !== a.sportType
       ? '<span class="tag">原始类型 ' + esc(a.rawSportType) + '</span>'
       : '') +
-    '</div>' +
-    '<div class="msub">' + esc(fmtTime(a.startTime)) + ' · ' + esc(a.id) + '</div>';
+    '</span>';
+  document.getElementById('modal-sub').innerHTML =
+    esc(fmtTime(a.startTime)) + ' · ' + esc(a.sportType) + ' · ' + esc(a.id);
 
   document.getElementById('modal-body').innerHTML = [
     statsBlock(a, m, sum),
@@ -402,7 +416,7 @@ function svgTrack() {
     '</div>';
 
   return (
-    '<svg viewBox="0 0 ' + W + ' ' + H + '" class="svg-track" preserveAspectRatio="xMidYMid meet">' +
+    '<svg viewBox="0 0 ' + W + ' ' + H + '" class="svg-track" preserveAspectRatio="xMidYMid meet" role="img" aria-label="活动轨迹图">' +
     '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#12151b" rx="8"/>' +
     paths.join('') +
     '</svg>' + legend
@@ -463,7 +477,8 @@ function svgSeries(s, color) {
     .join('');
 
   return (
-    '<svg viewBox="0 0 ' + W + ' ' + H + '" class="svg-series" preserveAspectRatio="none">' +
+    '<svg viewBox="0 0 ' + W + ' ' + H + '" class="svg-series" preserveAspectRatio="none" role="img" aria-label="' +
+      esc(s.label) + '曲线，最小 ' + dnum(s.min, 1) + '，最大 ' + dnum(s.max, 1) + ' ' + esc(s.unit) + '">' +
     grid +
     '<path d="' + area + '" fill="' + color + '" opacity="0.13"/>' +
     '<path d="' + line + '" fill="none" stroke="' + color + '" stroke-width="1.6" stroke-linejoin="round"/>' +
@@ -499,8 +514,13 @@ function filesBlock(a) {
   return (
     '<h3 class="sec">文件</h3>' +
     (files.length
-      ? '<table class="ftable"><thead><tr><th>类型</th><th>坐标系</th><th>大小</th><th>SHA-256</th><th></th></tr></thead><tbody>' +
-        rows + '</tbody></table>'
+      ? tableWrap(
+        '<table class="ftable"><caption class="visually-hidden">本地文件</caption>' +
+        '<thead><tr><th scope="col">类型</th><th scope="col">坐标系</th><th scope="col">大小</th>' +
+        '<th scope="col">SHA-256</th><th scope="col">操作</th></tr></thead><tbody>' +
+        rows + '</tbody></table>',
+        '本地文件',
+      )
       : '<div class="empty">没有本地文件</div>')
   );
 }
@@ -527,17 +547,23 @@ function relatedBlock() {
         '<td>' + (r.timeDiffSec === 0 ? '—' : Math.round(r.timeDiffSec) + 's') + '</td>' +
         '<td><span class="tag">' + esc(r.coordinateSystem || 'unknown') + '</span></td>' +
         '<td>' + (offset ? '<span class="tag ok">' + esc(offset) + '</span>' : '') + '</td>' +
-        '<td class="row end">' +
-        '<button data-overlay="' + esc(r.id) + '">' + (ov ? '取消叠加' : '叠加对比') + '</button>' +
-        '<button data-open="' + esc(r.id) + '">打开</button>' +
+        '<td class="row end acts">' +
+        '<button type="button" data-overlay="' + esc(r.id) + '">' + (ov ? '取消叠加' : '叠加对比') + '</button>' +
+        '<button type="button" data-open="' + esc(r.id) + '">打开</button>' +
         '</td></tr>'
       );
     })
     .join('');
   return (
     head +
-    '<table class="ftable"><thead><tr><th>平台</th><th>名称</th><th>距离</th><th>距离差</th><th>时间差</th><th>坐标系</th><th>叠加偏移</th><th></th></tr></thead><tbody>' +
-    rows + '</tbody></table>'
+    tableWrap(
+      '<table class="ftable"><caption class="visually-hidden">其它平台上的同一条活动</caption>' +
+      '<thead><tr><th scope="col">平台</th><th scope="col">名称</th><th scope="col">距离</th>' +
+      '<th scope="col">距离差</th><th scope="col">时间差</th><th scope="col">坐标系</th>' +
+      '<th scope="col">叠加偏移</th><th scope="col">操作</th></tr></thead><tbody>' +
+      rows + '</tbody></table>',
+      '跨平台关联活动',
+    )
   );
 }
 
@@ -581,7 +607,7 @@ function bindDetailEvents() {
         const r = await api('/activities/' + encodeURIComponent(id) + '/track');
         const other = r.track;
         if (!other || !other.track || other.track.length < 2) {
-          alert('该活动没有可用轨迹');
+          toast('该活动没有可用轨迹', 'warn');
           renderDetail();
           return;
         }
@@ -597,7 +623,7 @@ function bindDetailEvents() {
         });
         renderDetail();
       } catch (e) {
-        alert(e.message);
+        toast(e.message, 'err');
         renderDetail();
       }
     };
@@ -636,8 +662,3 @@ function haversine(lat1, lon1, lat2, lon2) {
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
-
-// Esc 关闭（document 不会被 body.innerHTML 冲掉，所以只需绑定一次）
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && DETAIL.id) detailClose();
-});

@@ -69,12 +69,64 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     hook: 'onRequest',
   });
 
+  /**
+   * 宽容的 JSON 解析器：空 body 当成 {}。
+   *
+   * Fastify 默认实现里，「Content-Type: application/json + 空 body」会被判成
+   * 非法 JSON 直接 400。但形如 POST /connections/:id/validate 这种
+   * 本来就没有请求体的接口，客户端很容易带上 JSON content-type。
+   */
+  app.addContentTypeParser(
+    'application/json',
+    { parseAs: 'string' },
+    (_req, body, done) => {
+      const raw = typeof body === 'string' ? body.trim() : '';
+      if (!raw) return done(null, {});
+      try {
+        done(null, JSON.parse(raw));
+      } catch (err) {
+        // 标成 400（客户端的 body 写错了），Fastify 默认会当成 500
+        const e = err as Error & { statusCode?: number };
+        e.statusCode = 400;
+        done(e, undefined);
+      }
+    },
+  );
+
   // Web 控制台（静态资源）
   const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
   await app.register(fastifyStatic, {
     root: publicDir,
     index: ['index.html'],
     prefix: '/',
+  });
+
+  /**
+   * 安全响应头。
+   *
+   * 自托管单用户场景，威胁模型很简单：主要防「被别的站点嵌进来点击劫持」
+   * 和「浏览器乱猜 Content-Type」。所以上加：
+   *   - frame-ancestors 'none' / X-Frame-Options: DENY  → 禁止被 iframe 嵌套
+   *   - X-Content-Type-Options: nosniff                  → 禁止 MIME 嗅探
+   *   - Referrer-Policy: same-origin                     → 不把 URL 泄露给第三方
+   *   - Permissions-Policy                               → 关掉用不到的敏感能力
+   *
+   * ★ 暂时**不**上 Content-Security-Policy：
+   *   前端目前用 innerHTML 拼字符串（所有插值都过 esc()，无 XSS），
+   *   上 CSP 需要先整体改成 DOM API 或 Trusted Types，工作量和收益不匹配。
+   *   等前端改成 createElement 为主之后再收紧 script-src。
+   */
+  app.addHook('onSend', async (_req, reply) => {
+    reply.header('X-Frame-Options', 'DENY');
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('Referrer-Policy', 'same-origin');
+    reply.header('Permissions-Policy', 'geolocation=(), camera=(), microphone=(), interest-cohort=()');
+    reply.header('Cross-Origin-Opener-Policy', 'same-origin');
+    // 自签名/局域网部署也要能拿到正确的 CSP 语义（frame-ancestors 只有 CSP 支持）
+    reply.header(
+      'Content-Security-Policy',
+      "frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
+    );
   });
 
   const SESSION_COOKIE = 'fb_session';
@@ -158,6 +210,10 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       sameSite: 'lax',
       signed: false,
       maxAge: 60 * 60 * 24 * 30,
+      // ★ 没有 __Host- 前缀 / secure：
+      //   __Host- 强制要求 Secure，而本项目默认跑在局域网 HTTP 上，
+      //   加上 Secure 浏览器就不会再发这个 cookie → 直接登不上。
+      //   等部署到 HTTPS（反向代理）后再改成 __Host-fb_session + secure: true。
     });
     return { ok: true };
   });

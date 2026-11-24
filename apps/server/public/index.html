@@ -3,11 +3,144 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark" />
+<meta name="theme-color" content="#0f1115" />
 <title>FitBridge</title>
 <link rel="stylesheet" href="/app.css" />
 </head>
 <body>
+
+<!--
+  静态骨架放在 <template> 里：
+  ① 避免用 innerHTML 拼自己的可信标记（Trusted Types 友好）
+  ② 只替换 #app 的内容，body 上的 <dialog> 等节点不会被冲掉
+-->
 <div id="app"></div>
+
+<!-- ── 登录 ─────────────────────────────────────────────── -->
+<template id="tpl-login">
+  <div class="login card">
+    <h1 class="login-title">FitBridge</h1>
+    <p class="hint" style="margin-bottom:14px">多平台运动数据同步 · 单用户自托管</p>
+    <form id="login-form">
+      <label for="pwd">管理员密码</label>
+      <input id="pwd" name="password" type="password" autocomplete="current-password" required />
+      <div class="err" id="err" role="alert"></div>
+      <div class="row end" style="margin-top:12px">
+        <button class="primary" type="submit">登录</button>
+      </div>
+    </form>
+  </div>
+</template>
+
+<!-- ── 主界面 ───────────────────────────────────────────── -->
+<template id="tpl-app">
+  <header class="top">
+    <div class="logo">Fit<span>Bridge</span></div>
+    <span class="badge" id="health">连接中…</span>
+    <div class="spacer"></div>
+    <span class="badge" id="mode">单用户 · 自托管</span>
+    <button id="logout">退出</button>
+  </header>
+
+  <main class="wrap">
+    <h1 class="visually-hidden">FitBridge 控制台</h1>
+
+    <section aria-labelledby="h-sync">
+      <h2 class="sec-title" id="h-sync">同步</h2>
+      <p class="hint">选择来源与目标平台 → 先「预览」确认影响面，再执行。目标平台仅在已连接且支持上传时可选。</p>
+      <div class="card">
+        <div class="row" style="gap:16px;align-items:flex-start">
+          <div style="flex:1;min-width:260px">
+            <label id="lbl-src" class="group-label">来源平台（可多选）</label>
+            <div id="src-list" class="chips" role="group" aria-labelledby="lbl-src"></div>
+          </div>
+          <div style="flex:1;min-width:260px">
+            <label id="lbl-mode" class="group-label">同步模式</label>
+            <div class="chips" id="mode-list" role="radiogroup" aria-labelledby="lbl-mode">
+              <label class="chip"><input type="radio" name="sync-mode" value="local" checked /> 仅同步到本地库</label>
+              <label class="chip"><input type="radio" name="sync-mode" value="upload" /> 同时上传到目标平台</label>
+            </div>
+          </div>
+        </div>
+        <div id="dst-wrap" style="display:none;margin-top:14px">
+          <label id="lbl-dst" class="group-label">目标平台（可多选，仅在「同时上传」模式下生效）</label>
+          <div id="dst-list" class="chips" role="group" aria-labelledby="lbl-dst"></div>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <label for="max-items" style="margin:0">条数上限</label>
+          <input id="max-items" name="maxItems" type="number" value="50" min="1" max="500" style="width:90px" />
+          <label class="chip" style="margin-left:6px"><input type="checkbox" id="force" /> 全量重拉</label>
+          <div class="spacer" style="flex:1"></div>
+          <button id="dry" type="button">预览（不写入）</button>
+          <button class="primary" id="run" type="button">同步到本地库</button>
+        </div>
+        <div class="muted" style="margin-top:10px;font-size:12.5px">
+          <b>增量</b>：默认只查「上次成功同步时间 − 24 小时回看窗口」内的新活动（平台列表是时间倒序，遇到更早的就停止翻页）。
+          所以平时点同步可能显示「发现 0 条」—— 那就是没有新活动，属正常。需要重新拉全部历史请勾选「全量重拉」。
+        </div>
+        <div class="muted" style="margin-top:6px;font-size:12.5px">
+          <b>去重三层</b>：① 来源唯一键（用户 + 平台 + 活动ID，数据库 UNIQUE 约束强制）② 目标侧 external_id 幂等键
+          ③ 上传前目标列表软存在检查。<b>已同步过的活动会被自动跳过，不会重复下载或重复上传；文件按内容哈希去重存储。</b>
+        </div>
+        <div id="sync-out" class="out" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-acts">
+      <h2 class="sec-title" id="h-acts">活动库</h2>
+      <p class="hint">跨平台统一运动库。元数据常驻；原始文件按保留期清理。</p>
+      <div class="card">
+        <form id="filter-form" class="row" style="margin-bottom:12px">
+          <label for="fq" class="visually-hidden">搜索名称或 ID</label>
+          <input id="fq" name="q" type="search" placeholder="搜索名称 / ID" style="width:220px" />
+          <label for="fplatform" class="visually-hidden">来源平台</label>
+          <select id="fplatform" name="platform" style="width:160px"></select>
+          <label for="fsport" class="visually-hidden">运动类型</label>
+          <select id="fsport" name="sport" style="width:140px">
+            <option value="">全部类型</option>
+            <option value="ride">骑行</option>
+            <option value="run">跑步</option>
+            <option value="swim">游泳</option>
+            <option value="hiking">徒步</option>
+            <option value="other">其他</option>
+          </select>
+          <label for="fsince" class="visually-hidden">开始日期</label>
+          <input id="fsince" name="since" type="date" style="width:150px" />
+          <label for="funtil" class="visually-hidden">结束日期</label>
+          <input id="funtil" name="until" type="date" style="width:150px" />
+          <button id="fgo" type="submit">筛选</button>
+          <button id="freset" type="button">重置</button>
+          <div class="spacer" style="flex:1"></div>
+          <span id="ftotal" class="badge" role="status" aria-live="polite"></span>
+        </form>
+        <div id="acts"></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-storage">
+      <h2 class="sec-title" id="h-storage">本地库</h2>
+      <p class="hint">元数据常驻 SQLite；原始文件按保留期清理（到期删文件、保留账本）。</p>
+      <div class="card" id="storage"></div>
+    </section>
+
+    <section aria-labelledby="h-plat">
+      <h2 class="sec-title" id="h-plat">平台</h2>
+      <p class="hint">能力矩阵由各适配器的 manifest 声明渲染。点击平台卡片可连接账号。</p>
+      <div class="grid" id="platforms"></div>
+    </section>
+
+    <section aria-labelledby="h-conns">
+      <h2 class="sec-title" id="h-conns">已连接账号</h2>
+      <div class="card" id="conns"></div>
+    </section>
+
+    <section aria-labelledby="h-events">
+      <h2 class="sec-title" id="h-events">运行事件</h2>
+      <div class="card" id="events" aria-live="polite"></div>
+    </section>
+  </main>
+</template>
 
 <script src="/app.js"></script>
 <script src="/detail.js"></script>

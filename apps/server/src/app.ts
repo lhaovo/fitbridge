@@ -479,6 +479,39 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     return { activity: a, files };
   });
 
+  /**
+   * 活动详情：轨迹点 + 指标序列（现场解析 FIT，不额外落库）。
+   */
+  app.get('/api/v1/activities/:id/track', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const a = await deps.store.get(DEFAULT_USER_ID, id);
+    if (!a) {
+      return reply
+        .code(404)
+        .send({ error: { code: 'NOT_FOUND', message: '活动不存在' } });
+    }
+    const q = req.query as Record<string, string | undefined>;
+    const convertTo = q.coord === 'none' ? 'none' : 'wgs84';
+    const fileRows = await deps.store.listFiles(id);
+    const { buildTrack } = await import('./lib/activity-detail.js');
+    const track = await buildTrack(deps.db, deps.fileStore!, a, fileRows, { convertTo });
+    return { track };
+  });
+
+  /**
+   * 跨平台关联活动：同一条骑行在其它平台的副本。
+   * 用于直观对比两个平台的数据差异（尤其是坐标系转换是否正确）。
+   */
+  app.get('/api/v1/activities/:id/related', async (req) => {
+    const { id } = req.params as { id: string };
+    const a = await deps.store.get(DEFAULT_USER_ID, id);
+    if (!a) {
+      return { related: [] };
+    }
+    const { findRelated } = await import('./lib/activity-detail.js');
+    return { related: findRelated(deps.db, a) };
+  });
+
   /** 下载原始文件 */
   app.get('/api/v1/activities/:id/file', async (req, reply) => {
     const { id } = req.params as { id: string };

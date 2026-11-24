@@ -496,6 +496,96 @@ describe('同步引擎', () => {
   });
 });
 
+describe('网络抖动重试', () => {
+  it('列表请求遇到临时网络错误会自动重试并最终成功', async () => {
+    let calls = 0;
+    const src: PlatformAdapter = {
+      ...makeSource(),
+      async listActivities() {
+        calls++;
+        if (calls < 3) {
+          // undici 的典型网络报错：cause.code = ECONNRESET
+          const err = new Error('fetch failed') as Error & {
+            cause?: { code: string };
+          };
+          err.cause = { code: 'ECONNRESET' };
+          throw err;
+        }
+        return { items: [], hasMore: false };
+      },
+    } as PlatformAdapter;
+
+    const summary = await runSync({
+      task: {
+        sourcePlatforms: ['src'],
+        targetPlatforms: [],
+        filters: {},
+        policy: { ...DEFAULT_SYNC_POLICY },
+      },
+      userId: 'default',
+      deps: {
+        adapters: new Map([['src', src]]),
+        credentials: async () => ({
+          id: 'c1',
+          userId: 'default',
+          platformId: 'src',
+          secret: { token: 't' },
+        }),
+        files: new MemFiles(),
+        store: new MemStore(),
+        events: new MemEvents(),
+        retryDelaysMs: [1, 1, 1],
+      },
+    });
+
+    expect(calls).toBe(3);
+    expect(summary.errors).toEqual([]);
+  }, 20000);
+
+  it('一直失败时不会无限重试（有重试预算）', async () => {
+    let calls = 0;
+    const src: PlatformAdapter = {
+      ...makeSource(),
+      async listActivities() {
+        calls++;
+        const err = new Error('fetch failed') as Error & {
+          cause?: { code: string };
+        };
+        err.cause = { code: 'ECONNRESET' };
+        throw err;
+      },
+    } as PlatformAdapter;
+
+    const summary = await runSync({
+      task: {
+        sourcePlatforms: ['src'],
+        targetPlatforms: [],
+        filters: {},
+        policy: { ...DEFAULT_SYNC_POLICY },
+      },
+      userId: 'default',
+      deps: {
+        adapters: new Map([['src', src]]),
+        credentials: async () => ({
+          id: 'c1',
+          userId: 'default',
+          platformId: 'src',
+          secret: { token: 't' },
+        }),
+        files: new MemFiles(),
+        store: new MemStore(),
+        events: new MemEvents(),
+        retryDelaysMs: [1, 1, 1],
+      },
+    });
+
+    // 首次 + 3 次退避重试
+    expect(calls).toBe(4);
+    expect(summary.errors.length).toBe(1);
+    expect(summary.errors[0]).toContain('src');
+  }, 30000);
+});
+
 describe('增量：时间回看窗口（不用页码游标）', () => {
   it('把 since 传给适配器（= 上次成功时间 - 回看窗口）', async () => {
     const seen: Array<string | undefined> = [];
@@ -536,6 +626,52 @@ describe('增量：时间回看窗口（不用页码游标）', () => {
     });
 
     expect(seen[0]).toBe('2026-11-19T00:00:00.000Z');
+  });
+
+  it('全量重拉（forceResync）时不带 since，拉全量历史', async () => {
+    const seen: Array<string | undefined> = [];
+    const src: PlatformAdapter = {
+      ...makeSource(),
+      async listActivities(_c, opts) {
+        seen.push(opts?.since);
+        return { items: [], hasMore: false };
+      },
+    } as PlatformAdapter;
+
+    const store2 = new MemStore();
+    await store2.setSyncState('default', 'src', {
+      lastSuccessAt: '2026-11-20T00:00:00.000Z',
+      lookbackSec: 86400,
+    });
+
+    await runSync({
+      task: {
+        sourcePlatforms: ['src'],
+        targetPlatforms: [],
+        filters: {},
+        policy: {
+          ...DEFAULT_SYNC_POLICY,
+          incremental: true,
+          lookbackHours: 24,
+          forceResync: true,
+        },
+      },
+      userId: 'default',
+      deps: {
+        adapters: new Map([['src', src]]),
+        credentials: async () => ({
+          id: 'c1',
+          userId: 'default',
+          platformId: 'src',
+          secret: { token: 't' },
+        }),
+        files: new MemFiles(),
+        store: store2,
+        events: new MemEvents(),
+      },
+    });
+
+    expect(seen[0]).toBeUndefined();
   });
 
   it('没有上次同步记录时不传 since（全量）', async () => {

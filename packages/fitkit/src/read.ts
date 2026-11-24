@@ -113,6 +113,23 @@ export async function readFit(
   const totalTimerSec =
     pickNumber(session?.total_timer_time, lap?.total_timer_time, agg.timer);
 
+  /**
+   * 平均速度：自己按「距离 / 移动时间」算，不用文件里的 avg_speed。
+   *
+   * 原因（实测 20 个真实 FIT 文件）：FIT 语义上 avg_speed == total_distance /
+   * total_timer_time（移动平均速度），但部分平台导出的文件里这个字段是坏的
+   * ——实测有 3/20 个文件写成 0 或明显偏小（0.534 vs 真实 3.956 m/s）。
+   * 自己算的结果与文件值一致（差异 <2%），所以以自算为准，文件值只做兜底。
+   */
+  const fileAvgSpeed = pickNumber(session?.avg_speed, lap?.avg_speed);
+  const avgSpeedMps = deriveAvgSpeed({
+    distanceM: totalDistanceM,
+    timerSec: totalTimerSec,
+    elapsedSec: totalElapsedSec,
+    fileAvgSpeed,
+    warnings,
+  });
+
   const summary: FitSummary = {
     sportType,
     rawSportType,
@@ -125,7 +142,7 @@ export async function readFit(
     totalTimerSec,
     elevationGainM: pickNumber(session?.total_ascent, lap?.total_ascent),
     elevationDescentM: pickNumber(session?.total_descent, lap?.total_descent),
-    avgSpeedMps: pickNumber(session?.avg_speed, lap?.avg_speed, agg.avgSpeed),
+    avgSpeedMps: avgSpeedMps ?? agg.avgSpeed,
     maxSpeedMps: pickNumber(session?.max_speed, lap?.max_speed, agg.maxSpeed),
     avgHeartRate: pickNumber(
       session?.avg_heart_rate,
@@ -160,6 +177,49 @@ export async function readFit(
   }
 
   return summary;
+}
+
+/**
+ * 计算平均速度（m/s）。
+ *
+ * FIT 语义：avg_speed = total_distance / total_timer_time（移动平均速度，
+ * 排除暂停）。优先自算；文件里的值只在自算不可用时兜底。
+ */
+function deriveAvgSpeed(args: {
+  distanceM?: number;
+  timerSec?: number;
+  elapsedSec?: number;
+  fileAvgSpeed?: number;
+  warnings: string[];
+}): number | undefined {
+  const { distanceM, timerSec, elapsedSec, fileAvgSpeed, warnings } = args;
+  const derivedTimer =
+    distanceM && timerSec && timerSec > 0 ? distanceM / timerSec : undefined;
+  const derivedElapsed =
+    distanceM && elapsedSec && elapsedSec > 0 ? distanceM / elapsedSec : undefined;
+
+  if (derivedTimer !== undefined) {
+    if (
+      fileAvgSpeed === undefined ||
+      fileAvgSpeed <= 0 ||
+      Math.abs(fileAvgSpeed - derivedTimer) / derivedTimer > 0.02
+    ) {
+      warnings.push(
+        `FIT avg_speed 字段异常(${fileAvgSpeed ?? '缺失'})，已按 距离/移动时间 重算为 ` +
+          `${derivedTimer.toFixed(3)} m/s`,
+      );
+    }
+    return derivedTimer;
+  }
+  if (derivedElapsed !== undefined) {
+    if (fileAvgSpeed === undefined || fileAvgSpeed <= 0) {
+      warnings.push(
+        `FIT avg_speed 字段缺失，已按 距离/总时长 重算为 ${derivedElapsed.toFixed(3)} m/s`,
+      );
+    }
+    return derivedElapsed;
+  }
+  return fileAvgSpeed;
 }
 
 /**

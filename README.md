@@ -25,6 +25,7 @@ FitBridge 是一个**自托管优先**的多平台运动数据同步服务。它
 | [docs/05-roadmap-risks.md](docs/05-roadmap-risks.md) | 里程碑路线图、风险登记表、待决策问题 |
 | [docs/06-decisions.md](docs/06-decisions.md) | **最终决策记录 + 本地存储策略 + M0 范围（优先级最高）** |
 | [docs/07-m0-progress.md](docs/07-m0-progress.md) | M0 进度、实测结论、本地开发指南 |
+| [docs/08-activity-detail.md](docs/08-activity-detail.md) | **活动详情页**：轨迹图 / 指标曲线 / 跨平台叠加对比 + 这一轮挖出的真实数据 bug |
 
 ## 状态
 
@@ -55,8 +56,9 @@ M0  骨架 + fitkit(只读解析) + 迈金OTM + MyWhoosh + 本地统一运动库
 | Postgres schema（11 表）+ 迁移器 | OK 实测通过 |
 | 单用户认证 + 凭证信封加密（AES-256-GCM） | OK 实测通过，48/48 测试绿 |
 | SQLite（Node 内置 node:sqlite）+ 本地 blob 存储 | OK 实测通过 |
-| Web 控制台 v1（登录 / 平台矩阵 / 连接账号） | OK 已可访问 |
-| 同步引擎编排（活动库填充） | 待做 |
+| Web 控制台 v2（同步 / 活动库 / 本地库状态 / 平台矩阵 / 事件流） | OK 已可访问 |
+| 同步引擎编排（活动库填充） | OK 真实账号跑通：迈金 33 + MyWhoosh 7 条，零失败 |
+| **活动详情页**（轨迹图 / 指标曲线 / 跨平台叠加对比） | OK |
 
 ## 快速启动
 

@@ -197,6 +197,43 @@ export function isTransientFailure(raw: string, status?: number): boolean {
     t.includes('etimedout') ||
     t.includes('econnrefused') ||
     t.includes('socket hang up') ||
-    t.includes('network')
+    t.includes('network') ||
+    t.includes('enotfound') ||
+    t.includes('eai_again') ||
+    t.includes('fetch failed') ||
+    t.includes('连接超时') ||
+    t.includes('连接被拒绝') ||
+    t.includes('连接被重置') ||
+    t.includes('域名解析失败') ||
+    t.includes('tls 证书')
   );
+}
+
+/** 网络层错误码（undici / Node）→ 是否值得重试 */
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EPIPE',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'UND_ERR_SOCKET',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+]);
+
+/** 从异常链里找出网络错误码 */
+export function networkErrorCode(err: unknown): string | undefined {
+  let cur: unknown = err;
+  for (let i = 0; i < 5 && cur; i++) {
+    const code = (cur as { code?: unknown })?.code;
+    if (typeof code === 'string' && TRANSIENT_NETWORK_CODES.has(code)) {
+      return code;
+    }
+    cur = (cur as { cause?: unknown })?.cause;
+  }
+  return undefined;
 }

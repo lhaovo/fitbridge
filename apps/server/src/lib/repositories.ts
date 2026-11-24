@@ -472,6 +472,7 @@ export class SqliteActivityStore implements ActivityStore {
       syncState: r.sync_state as StoredActivity['syncState'],
       lastSyncedAt: r.last_synced_at ?? undefined,
       syncedTargets: this.syncedTargets(r.id),
+      raw: r.raw ? parseJson(r.raw) : undefined,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     };

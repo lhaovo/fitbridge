@@ -73,6 +73,12 @@ export interface SyntheticFitOptions {
   withHr?: boolean;
   /** 是否写功率 */
   withPower?: boolean;
+  /**
+   * 覆盖 session.avg_speed 的原始值（scale 1000）。
+   * 真实数据里这个字段有时是坏的（0 或明显偏小），
+   * 用它来验证 readFit 会按「距离/移动时间」重算。
+   */
+  sessionAvgSpeedRaw?: number;
 }
 
 export function buildSyntheticFit(opts: SyntheticFitOptions): Buffer {
@@ -88,7 +94,14 @@ export function buildSyntheticFit(opts: SyntheticFitOptions): Buffer {
     withLocalTimestamp = true,
     withHr = true,
     withPower = true,
+    sessionAvgSpeedRaw,
   } = opts;
+
+  // 记录速度固定 5 m/s → 距离增量必须与之一致，
+  // 否则合成文件本身就是「坏文件」（avg_speed 与距离/时长 对不上）。
+  const RECORD_SPEED_MPS = 5;
+  const stepMeters = RECORD_SPEED_MPS * intervalSec;
+  const totalDistanceM = stepMeters * recordCount;
 
   const enc = new FitEncoder();
 
@@ -108,9 +121,12 @@ export function buildSyntheticFit(opts: SyntheticFitOptions): Buffer {
     enumF(5, 2), // sport = cycling
     u32(7, totalElapsedSec * 1000), // total_elapsed_time (scale 1000)
     u32(8, totalElapsedSec * 1000), // total_timer_time
-    u32(9, 12345), // total_distance (scale 100) → 123.45 m
+    u32(9, Math.round(totalDistanceM * 100)), // total_distance (scale 100)
     u16(11, 320), // total_calories
-    u16(14, 5000), // avg_speed (scale 1000) → 5 m/s
+    u16(
+      14,
+      sessionAvgSpeedRaw ?? RECORD_SPEED_MPS * 1000,
+    ), // avg_speed (scale 1000) → 5 m/s
     u16(15, 12000), // max_speed → 12 m/s
     ...(withHr ? [u8(16, 145), u8(17, 172)] : []),
     u8(18, 88), // avg_cadence
@@ -124,7 +140,7 @@ export function buildSyntheticFit(opts: SyntheticFitOptions): Buffer {
   enc.writeMessage(19, [
     u32(2, FitEncoder.toFitTimestamp(start)),
     u32(7, totalElapsedSec * 1000),
-    u32(9, 12345),
+    u32(9, Math.round(totalDistanceM * 100)),
     enumF(25, 8), // lap_trigger = time
   ]);
 
@@ -154,8 +170,8 @@ export function buildSyntheticFit(opts: SyntheticFitOptions): Buffer {
       s32(0, Math.round(lat * SEMICIRCLES)),
       s32(1, Math.round(lon * SEMICIRCLES)),
       u16(2, 5100), // altitude (scale 5, offset 500) → 20 m
-      u32(5, (i + 1) * 100), // distance (scale 100) → 1 m increments
-      u16(6, 5000), // speed → 5 m/s
+      u32(5, Math.round((i + 1) * stepMeters * 100)), // distance (scale 100)
+      u16(6, RECORD_SPEED_MPS * 1000), // speed → 5 m/s
       u32(253, FitEncoder.toFitTimestamp(t)),
     ];
     if (withHr) fields.push(u8(3, 140 + (i % 10)));

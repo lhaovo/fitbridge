@@ -99,6 +99,58 @@ export function parseLocalRidingTime(v: string | undefined): string | undefined 
   return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
 }
 
+/**
+ * 解析迈金的本地时间串 → 带时区偏移的 ISO（保留「当地墙钟」语义）。
+ * 例："2026-11-21 13:03:35" → "2026-11-21T13:03:35+08:00"
+ */
+export function parseLocalWallClock(v: string | undefined): string | undefined {
+  if (!v) return undefined;
+  const m =
+    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(
+      v.trim(),
+    );
+  if (!m) return undefined;
+  const [, y, mo, da, h, mi, s] = m;
+  const abs = Math.abs(LOCAL_TZ_OFFSET_MIN);
+  const sign = LOCAL_TZ_OFFSET_MIN >= 0 ? '+' : '-';
+  const off =
+    sign +
+    String(Math.floor(abs / 60)).padStart(2, '0') +
+    ':' +
+    String(abs % 60).padStart(2, '0');
+  return `${y}-${mo}-${da}T${h}:${mi}:${s ?? '00'}${off}`;
+}
+
+/**
+ * 迈金的时间字段有两种形态：
+ *   列表项   start_riding_time = "2026-11-21 13:03:35"（本地墙钟，无时区）
+ *   详情记录 startRidingTime   = 1795237415000（unix 毫秒，绝对时刻）
+ * 统一解析成 { utc, local }：utc 是绝对时刻，local 是「当地墙钟 + 偏移」。
+ */
+function parseOtmStart(v: unknown): { utc?: string; local?: string } {
+  if (typeof v === 'string') {
+    const utc = parseLocalRidingTime(v);
+    if (utc) return { utc, local: parseLocalWallClock(v) };
+  }
+  const iso = normalizeTimestamp(v as string | number | undefined);
+  if (!iso) return {};
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return {};
+  const d = new Date(t + LOCAL_TZ_OFFSET_MIN * 60000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  const abs = Math.abs(LOCAL_TZ_OFFSET_MIN);
+  const off =
+    (LOCAL_TZ_OFFSET_MIN >= 0 ? '+' : '-') +
+    String(Math.floor(abs / 60)).padStart(2, '0') +
+    ':' +
+    String(abs % 60).padStart(2, '0');
+  const local =
+    `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}` +
+    `T${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}` +
+    off;
+  return { utc: iso, local };
+}
+
 interface OtmListData {
   list?: OtmListItem[];
   records?: OtmListItem[];
@@ -199,14 +251,18 @@ export async function getActivityDetail(
     '迈金活动详情',
   );
   const rec = env.data?.ridingRecord ?? {};
+  const started = parseOtmStart(
+    (rec as { start_riding_time?: string; startRidingTime?: number })
+      .start_riding_time ??
+      (rec as { startRidingTime?: number }).startRidingTime ??
+      rec.startTime,
+  );
 
   return {
     remoteId,
     name: rec.title ?? rec.name ?? undefined,
-    startTime:
-      parseLocalRidingTime(
-        (rec as { start_riding_time?: string }).start_riding_time,
-      ) ?? normalizeTimestamp(rec.startTime),
+    startTime: started.utc,
+    localStartTime: started.local,
     distanceMeters:
       typeof (rec as { distance_km?: number }).distance_km === 'number'
         ? (rec as { distance_km: number }).distance_km * 1000
@@ -215,6 +271,8 @@ export async function getActivityDetail(
       (rec as { time_seconds?: number }).time_seconds ?? rec.ridingTime,
     // 文件级坐标系：durl 是七牛直链（WGS-84），fit_content 是 GCJ-02
     coordinateSystem: rec.fitUrl ? 'gcj02' : rec.durl ? 'wgs84' : undefined,
+    // 迈金给的是本地时间串（无时区），按 UTC+8 解读 → 记录偏移量
+    timezoneOffset: LOCAL_TZ_OFFSET_MIN,
     raw: rec,
   };
 }
@@ -223,9 +281,8 @@ function toRemoteActivity(it: OtmListItem): RemoteActivity | undefined {
   const id = it.id ?? it.rideId;
   if (id === undefined || id === null) return undefined;
 
-  const startTime =
-    parseLocalRidingTime(it.start_riding_time) ??
-    normalizeTimestamp(it.startTime ?? it.startTimestamp);
+  const started = parseOtmStart(it.start_riding_time ?? it.startTime ?? it.startTimestamp);
+  const startTime = started.utc;
 
   // 距离：优先 distance_km（公里），兼容旧字段（米）
   const distanceMeters =
@@ -248,6 +305,9 @@ function toRemoteActivity(it: OtmListItem): RemoteActivity | undefined {
     name,
     sportType: it.rideType ?? it.sportType ?? 'cycling',
     startTime,
+    localStartTime: started.local,
+    // 迈金给的是本地时间串（无时区），按 UTC+8 解读
+    timezoneOffset: LOCAL_TZ_OFFSET_MIN,
     distanceMeters,
     durationSec,
     elevationGainMeters: it.elevation_gain ?? it.elevationGain,

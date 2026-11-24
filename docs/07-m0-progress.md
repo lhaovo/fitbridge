@@ -18,6 +18,7 @@
 | 0.7 Adapter `mywhoosh` | ⚠️ 离线验证 | 协议实现完成 + 5 个回归测试（未用真实账号验证） |
 | 0.8 同步引擎 | ✅ | 全流程 + **真实账号验证通过：迈金 20 条 + MyWhoosh 7 条，零失败** |
 | 0.9 Web 控制台 | ✅ v2 | 同步编排(模式/预览/全量重拉) + 活动库(筛选/下载) + **本地库状态面板** + 平台矩阵 + 事件流（已截图验证） |
+| 0.11 **活动详情页** | ✅ | 统计网格 + **SVG 轨迹图** + 指标曲线(速度/心率/功率/踏频/海拔) + 坐标系徽章 + 文件列表 + **跨平台叠加对比**（带偏移量化）+ 平台原始报文（详见 `docs/08-activity-detail.md`） |
 | 0.10 导出 + 备份 + 部署文档 | ⚠️ 部分 | backup/restore 已适配 SQLite；「导出全部」功能未做 |
 
 **下一步（按风险从高到低）**：
@@ -26,7 +27,7 @@
 2. ~~真实账号跑一次完整同步~~ ✅ 已完成（27 条，零失败）
    —— 过程中发现并修复了 6 个只有真实数据才能暴露的 bug（见下方）
 3. MyWhoosh → 迈金 的真实上传闭环（若 MyWhoosh 给的是 FIT 则无需转换）
-4. 定时任务调度 + 活动详情轨迹图
+4. 定时任务调度
 5. GPX→FIT 构建（仅当 MyWhoosh 实际返回 GPX 时才需要）
 
 ---
@@ -171,6 +172,8 @@ fitbridge/
 | POST | `/api/v1/sync/run` | 触发同步（支持 dryRun 预览） |
 | GET | `/api/v1/activities` | 活动库列表（多维筛选） |
 | GET | `/api/v1/activities/:id` | 活动详情 + 文件列表 |
+| GET | `/api/v1/activities/:id/track` | **轨迹点 + 指标序列**（`?coord=wgs84\|none`，现场解析 FIT） |
+| GET | `/api/v1/activities/:id/related` | **跨平台关联活动**（时间差≤5min 且距离差≤2%） |
 | GET | `/api/v1/activities/:id/file` | 下载原始文件 |
 | DELETE | `/api/v1/activities/:id` | 删除本地副本（含 blob） |
 | GET | `/api/v1/events` | 事件历史 |
@@ -184,7 +187,7 @@ fitbridge/
 - [x] 同步引擎编排 + 落库 + 去重账本（含 AUTH_EXPIRED → 自动重登 → 重试）
 - [x] 文件保留期清理任务（L2 90 天 / L3 7 天，启动时 + 每 6h）
 - [ ] 定时任务调度（目前只能手动 / API 触发）
-- [ ] 活动详情页：轨迹图 + 指标图表 + 多平台对比
+- [x] 活动详情页：轨迹图 + 指标图表 + 多平台对比
 - [ ] GPX→FIT 构建（M1，`fitkit/src/build.ts`）
 - [ ] FIT 合规修复（M1，`fitkit/src/repair.ts`）
 - [ ] 限流 / 退避 / 熔断（Policy 层）

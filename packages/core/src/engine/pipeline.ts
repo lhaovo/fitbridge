@@ -27,10 +27,13 @@ export interface NormalizedActivity {
   /** 平台原始运动类型，未能归类时保留 */
   rawSportType?: string;
   startTime?: string;
+  localStartTime?: string;
   timezoneOffsetMin?: number;
   timezoneSource: FitSummary['timezoneSource'];
   distanceMeters: number;
   durationSec: number;
+  /** 移动时长（FIT total_timer_time，排除暂停） */
+  movingTimeSec?: number;
   elevationGainMeters?: number;
   metrics: Record<string, number | undefined>;
   flags: {
@@ -139,10 +142,12 @@ export async function normalize(
     fit?.totalElapsedSec ?? activity.durationSec ?? 0;
 
   // 时区优先级：平台明确给 > FIT 文件 local_timestamp > 未知
+  // 注意用 != null 判断：偏移 0（UTC）也是有效值，不能被当成「没有」
   let timezoneOffsetMin = activity.timezoneOffset ?? fit?.timezoneOffsetMin;
-  let timezoneSource: FitSummary['timezoneSource'] = activity.timezoneOffset
-    ? 'platform'
-    : (fit?.timezoneSource ?? 'unknown');
+  let timezoneSource: FitSummary['timezoneSource'] =
+    activity.timezoneOffset !== undefined && activity.timezoneOffset !== null
+      ? 'platform'
+      : (fit?.timezoneSource ?? 'unknown');
 
   return {
     source: {
@@ -160,10 +165,12 @@ export async function normalize(
     rawSportType: fit?.rawSportType,
     // ★ 优先用 FIT 里的绝对时间（UTC）；平台给的本地时间串作为兜底
     startTime: fit?.startTime ?? activity.startTime,
+    localStartTime: activity.localStartTime,
     timezoneOffsetMin,
     timezoneSource,
     distanceMeters,
     durationSec,
+    movingTimeSec: fit?.totalTimerSec,
     elevationGainMeters:
       fit?.elevationGainM ?? activity.elevationGainMeters,
     metrics: {

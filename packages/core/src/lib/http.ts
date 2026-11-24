@@ -153,8 +153,53 @@ export class HttpClient {
         signal: controller.signal,
         redirect: opts.redirect ?? 'follow',
       });
+    } catch (err) {
+      // undici 的报错信息非常 unhelpful（"fetch failed"），
+      // 这里补上「哪个域名 + 什么原因」，否则用户只能看到一句 fetch failed。
+      throw enrichNetworkError(err, this.url(path));
     } finally {
       clearTimeout(timeout);
     }
+  }
+}
+
+/**
+ * 把底层网络错误翻译成可读信息。
+ *
+ * 常见场景：
+ *   - ENOTFOUND / EAI_AGAIN → DNS 解析失败（容器/服务器 DNS 没配好）
+ *   - ECONNREFUSED → 端口不通
+ *   - ETIMEDOUT / UND_ERR_CONNECT_TIMEOUT → 连接超时（多半是出口网络或代理拦截）
+ *   - CERT_* → 证书问题
+ */
+function enrichNetworkError(err: unknown, url: string): Error {
+  const raw = err as { message?: string; cause?: { code?: string; message?: string } };
+  const code = raw?.cause?.code ?? '';
+  const host = safeHost(url);
+  const base = raw?.cause?.message ?? raw?.message ?? '未知错误';
+
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    return new Error(`域名解析失败（${host}）：${base} —— 检查 DNS / 代理配置`);
+  }
+  if (code === 'ECONNREFUSED') {
+    return new Error(`连接被拒绝（${host}）：${base} —— 服务未监听或被防火墙拦截`);
+  }
+  if (code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT' || code === 'UND_ERR_HEADERS_TIMEOUT') {
+    return new Error(`连接超时（${host}）：${base} —— 出口网络不通或被代理拦截`);
+  }
+  if (code.startsWith('CERT_') || code === 'DEPTH_ZERO_SELF_SIGNED_CERT' || code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE') {
+    return new Error(`TLS 证书校验失败（${host}）：${base}`);
+  }
+  if (code === 'UND_ERR_SOCKET' || code === 'ECONNRESET') {
+    return new Error(`连接被重置（${host}）：${base}`);
+  }
+  return new Error(`网络请求失败（${host}）：${base}`);
+}
+
+function safeHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
   }
 }

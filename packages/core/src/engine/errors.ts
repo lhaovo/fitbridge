@@ -1,4 +1,4 @@
-import { classifyAuthFailure, isTransientFailure } from './risk.js';
+import { classifyAuthFailure, isTransientFailure, networkErrorCode } from './risk.js';
 
 /**
  * 携带 HTTP 状态码的平台异常。
@@ -119,6 +119,13 @@ export function normalizeError(err: unknown, platformId?: string): PlatformError
     return new PlatformError('VALIDATION_FAILED', message, { platformId, cause: err });
   }
   if (status !== undefined && status >= 500) {
+    return new PlatformError('TRANSIENT', message, { platformId, cause: err });
+  }
+
+  // 网络层错误（连接超时 / DNS 失败 / 连接重置…）→ 可重试
+  // 先看错误链上的错误码，再看文本（HttpClient 已经把消息翻成中文了）
+  const netCode = networkErrorCode(err);
+  if (netCode || isTransientFailure(message)) {
     return new PlatformError('TRANSIENT', message, { platformId, cause: err });
   }
 

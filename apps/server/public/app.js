@@ -347,11 +347,16 @@ async function loadActivities() {
         <td style="font-size:12px;color:var(--muted)">${esc(metricTxt || '—')}</td>
         <td>${(a.syncedTargets || []).map((t) => '<span class="tag yes">' + esc(t) + '</span>').join(' ') || '<span class="muted">—</span>'}</td>
         <td class="row end">
+          <button data-view="${esc(a.id)}">详情</button>
           <a class="btn-link" href="/api/v1/activities/${esc(a.id)}/file">下载</a>
           <button data-del="${esc(a.id)}">删除</button>
         </td>
       </tr>`;
     }).join('') + '</tbody></table>';
+
+  $$('button[data-view]').forEach((b) => {
+    b.onclick = () => openDetail(b.dataset.view);
+  });
 
   $$('button[data-del]').forEach((b) => {
     b.onclick = async () => {

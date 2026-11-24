@@ -50,6 +50,8 @@ export interface StoredActivity {
   syncState: 'pending' | 'synced' | 'partial' | 'failed';
   lastSyncedAt?: string;
   syncedTargets: string[];
+  /** 平台原始报文（排障用，可能较大） */
+  raw?: unknown;
   createdAt: string;
   updatedAt: string;
 }

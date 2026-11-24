@@ -63,6 +63,8 @@ export interface SyncRunDeps {
   /** 风控闸门：返回 undefined 表示放行 */
   gate?: (platformId: string, account?: string) => Promise<GateResult | undefined>;
   now?: () => Date;
+  /** 网络重试的退避间隔（测试里可以调小，避免等好几秒） */
+  retryDelaysMs?: number[];
 }
 
 export interface PlatformStat {
@@ -139,6 +141,13 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
     trigger: opts.trigger ?? 'manual',
   });
 
+  /**
+   * 网络重试预算（整轮共享）。
+   * 没有预算的话，「平台每个活动都 500」会把一轮同步拖成十几分钟。
+   */
+  const transientBudget = { left: TRANSIENT_RETRY_BUDGET };
+  const retryDelays = deps.retryDelaysMs ?? TRANSIENT_RETRY_DELAYS_MS;
+
   /** 本次处理过的活动（用于上传阶段） */
   const processed: { activityId: string; sourcePlatform: string; kind: 'fit' | 'gpx' | 'tcx'; blobKey: string; name: string; startTime?: string; sportType: string; timezoneOffsetMin?: number }[] = [];
 
@@ -197,7 +206,8 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
     // 平台列表是时间倒序的，适配器遇到早于 since 的就停止翻页。
     // 回看窗口用来覆盖「平台延迟入库」和「上次同步中途失败」。
     let since: string | undefined;
-    if (policy.incremental) {
+    // 全量重拉：连列表窗口也不限制，否则「全量」只是把窗口内的活动重下一遍
+    if (policy.incremental && !policy.forceResync) {
       const state = await deps.store.getSyncState(userId, platformId);
       if (state?.lastSuccessAt) {
         const lookbackMs = policy.lookbackHours * 3600 * 1000;
@@ -219,6 +229,9 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
           }),
         deps,
         platformId,
+        userId,
+        transientBudget,
+        retryDelays,
       );
     } catch (err) {
       const e = normalizeError(err, platformId);
@@ -285,6 +298,9 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
           async () => detailOf(adapter, cred, remote),
           deps,
           platformId,
+          userId,
+          transientBudget,
+          retryDelays,
         );
 
         const payload = await withAuthRetry(
@@ -293,6 +309,9 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
           () => adapter.downloadFile(cred, detail),
           deps,
           platformId,
+          userId,
+          transientBudget,
+          retryDelays,
         );
 
         const normalized = await normalize(adapter, detail, payload);
@@ -306,9 +325,11 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
           sportType: normalized.sportType,
           rawSportType: normalized.rawSportType,
           startTime: normalized.startTime,
+          localStartTime: normalized.localStartTime,
           timezoneOffsetMin: normalized.timezoneOffsetMin,
           timezoneSource: normalized.timezoneSource,
           durationSec: normalized.durationSec,
+          movingTimeSec: normalized.movingTimeSec,
           distanceMeters: normalized.distanceMeters,
           elevationGainMeters: normalized.elevationGainMeters,
           metrics: normalized.metrics,
@@ -588,10 +609,26 @@ function fileName(item: { name: string; kind: string; activityId: string }): str
 }
 
 /**
+ * 网络抖动重试的退避间隔（毫秒）。
+ *
+ * 实测遇到过平台 API 域名被出口网络/代理间歇性拦截（TCP 连不上），
+ * 立刻重试大概率还是失败，等一下再试成功率明显更高。
+ */
+const TRANSIENT_RETRY_DELAYS_MS = [1500, 4000, 8000];
+
+/** 一轮同步里最多允许多少次网络重试 */
+const TRANSIENT_RETRY_BUDGET = 12;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * 带自动重登的调用包装。
  *
- * token 过期（401）→ 用保存的账号密码重新登录 → 重试一次。
- * ★ 绝不无限重试：只重试一次，重登失败就直接抛。
+ * - token 过期（401）→ 用保存的账号密码重新登录 → 重试一次
+ *   （★ 绝不无限重试：只重登一次，重登失败就直接抛）
+ * - 网络抖动 / 5xx → 退避后重试（整轮共享预算，避免拖死整轮同步）
  */
 async function withAuthRetry<T>(
   adapter: PlatformAdapter,
@@ -599,26 +636,56 @@ async function withAuthRetry<T>(
   fn: () => Promise<T>,
   deps: SyncRunDeps,
   platformId: string,
+  userId?: string,
+  budget?: { left: number },
+  delaysMs?: number[],
 ): Promise<T> {
-  try {
-    return await fn();
-  } catch (err) {
-    const e = normalizeError(err, platformId);
-    if (e.code !== 'AUTH_EXPIRED') throw e;
+  let transientAttempt = 0;
+  let reloginUsed = false;
 
-    if (!cred.credentials?.account || !cred.credentials?.password) {
-      throw e;
-    }
-
-    const fresh = await relogin(adapter, cred);
-    Object.assign(cred.secret, fresh.secret);
-    if (fresh.meta) Object.assign(cred.meta ?? {}, fresh.meta);
-
-    // 只重试一次
+  for (;;) {
     try {
       return await fn();
-    } catch (err2) {
-      throw normalizeError(err2, platformId);
+    } catch (err) {
+      const e = normalizeError(err, platformId);
+
+      // ① 网络抖动 / 5xx：退避后重试
+      const delays = delaysMs ?? TRANSIENT_RETRY_DELAYS_MS;
+      if (
+        e.code === 'TRANSIENT' &&
+        transientAttempt < delays.length &&
+        (budget ? budget.left > 0 : true)
+      ) {
+        const delay = delays[transientAttempt]!;
+        transientAttempt++;
+        if (budget) budget.left--;
+        if (userId) {
+          await deps.events.emit(userId, {
+            level: 'warn',
+            category: 'platform',
+            platformId,
+            message:
+              `${platformId} 请求失败，${Math.round(delay / 1000)} 秒后重试 ` +
+              `(${transientAttempt}/${delays.length})：${e.message}`,
+            data: { code: e.code, delayMs: delay },
+          });
+        }
+        await sleep(delay);
+        continue;
+      }
+
+      // ② token 过期：重新登录后重试一次
+      if (e.code !== 'AUTH_EXPIRED' || reloginUsed) throw e;
+
+      if (!cred.credentials?.account || !cred.credentials?.password) {
+        throw e;
+      }
+      reloginUsed = true;
+
+      const fresh = await relogin(adapter, cred);
+      Object.assign(cred.secret, fresh.secret);
+      if (fresh.meta) Object.assign(cred.meta ?? {}, fresh.meta);
+      // 重新登录后继续循环（这次 fn 会用新 token 再跑一遍）
     }
   }
 }

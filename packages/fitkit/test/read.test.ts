@@ -11,7 +11,7 @@ describe('readFit', () => {
 
     expect(s.sportType).toBe('ride');
     expect(s.startTime).toBe(START.toISOString());
-    expect(s.totalDistanceM).toBeCloseTo(123.45, 2);
+    expect(s.totalDistanceM).toBeCloseTo(300, 2);
     expect(s.totalElapsedSec).toBe(60);
     expect(s.avgHeartRate).toBe(145);
     expect(s.maxHeartRate).toBe(172);
@@ -82,11 +82,49 @@ describe('readFit', () => {
     expect(s.track.length).toBeGreaterThan(0);
   });
 
+  it('avg_speed 按 距离/移动时间 自算（文件字段为 0 时不采信）', async () => {
+    // 真实数据里见过 avg_speed 写成 0 的文件
+    const buf = buildSyntheticFit({
+      start: START,
+      recordCount: 60,
+      sessionAvgSpeedRaw: 0,
+    });
+    const s = await readFit(buf);
+    expect(s.avgSpeedMps).toBeCloseTo(5, 2);
+    expect(s.warnings.join()).toContain('avg_speed');
+  });
+
+  it('avg_speed 明显偏离时按 距离/移动时间 重算', async () => {
+    // 实测样本：真实 3.956 m/s，文件里写成 0.534
+    const buf = buildSyntheticFit({
+      start: START,
+      recordCount: 60,
+      sessionAvgSpeedRaw: 534,
+    });
+    const s = await readFit(buf);
+    expect(s.avgSpeedMps).toBeCloseTo(5, 2);
+    expect(s.warnings.join()).toContain('avg_speed');
+  });
+
+  it('avg_speed 正常时不产生警告', async () => {
+    const buf = buildSyntheticFit({ start: START, recordCount: 60 });
+    const s = await readFit(buf);
+    expect(s.avgSpeedMps).toBeCloseTo(5, 2);
+    expect(s.warnings.join()).not.toContain('avg_speed');
+  });
+
+  it('maxTrackPoints=0 时不截断轨迹', async () => {
+    const buf = buildSyntheticFit({ start: START, recordCount: 120 });
+    const s = await readFit(buf, { maxTrackPoints: 0 });
+    expect(s.track).toHaveLength(120);
+    expect(s.trackTruncated).toBe(false);
+  });
+
   it('缺少 session 时从 record 聚合兜底', async () => {
     const buf = buildSyntheticFit({ start: START, recordCount: 20 });
     const s = await readFit(buf);
-    // 有 session 时优先用 session 的值
-    expect(s.totalDistanceM).toBeCloseTo(123.45, 2);
+    // 有 session 时优先用 session 的值（5 m/s × 20 s = 100 m）
+    expect(s.totalDistanceM).toBeCloseTo(100, 2);
   });
 });
 

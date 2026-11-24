@@ -58,6 +58,8 @@ export interface RemoteActivity {
   sportType?: string;
   /** ISO8601 */
   startTime?: string;
+  /** 平台当地墙钟时间（带偏移，如 2026-11-21T13:03:35+08:00） */
+  localStartTime?: string;
   /** 平台提供的时区偏移（分钟） */
   timezoneOffset?: number;
   distanceMeters?: number;

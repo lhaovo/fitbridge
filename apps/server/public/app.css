@@ -111,6 +111,15 @@ code {
 .btn-link:hover { color: var(--accent); border-color: var(--accent); }
 .spacer { flex: 1; }
 #acts table td { vertical-align: top; }
+/* 操作列：按钮不再换行，把宽度让给名称/指标列 */
+#acts table td.acts { flex-wrap: nowrap; justify-content: flex-end; gap: 6px; }
+#acts table td.acts button,
+#acts table td.acts .btn-link {
+  padding: 4px 9px; font-size: 12.5px;
+  white-space: nowrap; flex: 0 0 auto;
+}
+/* 数值列不换行 */
+#acts table td.num { white-space: nowrap; }
 #storage table { margin-top: 12px; }
 .chip input[type=checkbox] { width: auto; margin: 0; }
 

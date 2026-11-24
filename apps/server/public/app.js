@@ -341,12 +341,12 @@ async function loadActivities() {
         <td style="white-space:nowrap">${esc(fmtTime(a.startTime))}</td>
         <td>${esc(a.name)}${flags.length ? '<br/><span class="muted" style="font-size:11px">' + esc(flags.join(' · ')) + '</span>' : ''}</td>
         <td><span class="tag">${esc(a.source.platformId)}</span></td>
-        <td>${esc(fmtDist(a.distanceMeters))}</td>
-        <td>${esc(fmtDur(a.durationSec))}</td>
+        <td class="num">${esc(fmtDist(a.distanceMeters))}</td>
+        <td class="num">${esc(fmtDur(a.durationSec))}</td>
         <td>${esc(a.sportType)}</td>
         <td style="font-size:12px;color:var(--muted)">${esc(metricTxt || '—')}</td>
         <td>${(a.syncedTargets || []).map((t) => '<span class="tag yes">' + esc(t) + '</span>').join(' ') || '<span class="muted">—</span>'}</td>
-        <td class="row end">
+        <td class="row end acts">
           <button data-view="${esc(a.id)}">详情</button>
           <a class="btn-link" href="/api/v1/activities/${esc(a.id)}/file">下载</a>
           <button data-del="${esc(a.id)}">删除</button>

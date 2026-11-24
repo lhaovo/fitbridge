@@ -42,14 +42,6 @@ export class MyWhooshAdapter implements PlatformAdapter {
     return activities.listActivities(this.client, cred, opts);
   }
 
-  async getActivityDetail(
-    _cred: Credential,
-    remoteId: string,
-  ): Promise<RemoteActivityDetail> {
-    // 列表项里已包含 activityFileId，无需额外请求；这里仅作占位
-    return { remoteId };
-  }
-
   async downloadFile(
     cred: Credential,
     activity: RemoteActivityDetail,

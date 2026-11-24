@@ -16,14 +16,15 @@
 | 0.5b **风控防护** | ✅ | 失败分类 + 账号级冷却 + 登录节流 + 绝不自动重试（21 个单测） |
 | 0.6 Adapter `otm` | ⚠️ 离线验证 | 协议实现完成 + 8 个回归测试（未用真实账号验证） |
 | 0.7 Adapter `mywhoosh` | ⚠️ 离线验证 | 协议实现完成 + 5 个回归测试（未用真实账号验证） |
-| 0.8 同步引擎 | ✅ | Discover→Fetch→Normalize→Dedupe→Fanout→Upload 全流程（14 单测） |
+| 0.8 同步引擎 | ✅ | 全流程 + **真实账号验证通过：迈金 20 条 + MyWhoosh 7 条，零失败** |
 | 0.9 Web 控制台 | ✅ v2 | 同步编排(预览/执行) + 活动库(筛选/详情/下载) + 平台矩阵 + 事件流（已截图验证） |
 | 0.10 导出 + 备份 + 部署文档 | ⚠️ 部分 | backup/restore 已适配 SQLite；「导出全部」功能未做 |
 
 **下一步（按风险从高到低）**：
 
 1. **用真实账号验证两个适配器**（最高风险：逆向接口细节可能已变）
-2. **真实账号跑一次完整同步**（引擎已就绪，缺的是真实数据验证）
+2. ~~真实账号跑一次完整同步~~ ✅ 已完成（27 条，零失败）
+   —— 过程中发现并修复了 6 个只有真实数据才能暴露的 bug（见下方）
 3. MyWhoosh → 迈金 的真实上传闭环（若 MyWhoosh 给的是 FIT 则无需转换）
 4. 定时任务调度 + 活动详情轨迹图
 5. GPX→FIT 构建（仅当 MyWhoosh 实际返回 GPX 时才需要）
@@ -31,6 +32,27 @@
 ---
 
 ## 二、已验证的事实（实测结论）
+
+### 真实账号同步暴露的 bug（2026-11-24 全部已修）
+
+| # | 现象 | 根因 | 修法 |
+|---|---|---|---|
+| 1 | `table activities has no column named raw_sport_type` | repository 用了这列但迁移没建 | 加迁移 003；新增 repositories 测试做 **schema 漂移检测** |
+| 2 | MyWhoosh 全部下载失败（404） | 下载路径多拼了 `/activities` | 改为 `/v2/rider/profile/download-activity-file`，加回归测试锁定 |
+| 3 | MyWhoosh 下载报"没有 activityFileId" | 引擎直接调 `getActivityDetail` 丢掉了列表项的 `raw` | 引擎改走 pipeline 的 `detail()`（合并） |
+| 4 | 迈金活动名全是 "cycling"、距离/时长/心率为空 | 字段名猜错（真实是 `distance_km`/`time_seconds`/`avg_heart_bpm`，且 `name` 为 null） | 按实测字段重写映射 + 加实测字段单测 |
+| 5 | MyWhoosh 时间显示成 "1795237415.0" | `date` 是 unix 秒没转换 | 优先用 `startDatetime`（ISO），`date` 做转换兜底 |
+| 6 | 迈金第二次同步拉不到数据 | 用页码当增量游标，limit 变化后页码含义漂移 | 改**时间回看窗口 + 时间早停**；本地幂等键兜底 |
+
+另修：`detectFileKind` 把任意 JSON 误判成 GPX；`sync_items.run_id` 外键导致
+**每次上传都会失败**（markSynced 用了不存在的 run_id='manual'）→ 改为正规 sync_runs 记录。
+
+### 数据库布局
+
+原用 WAL 模式，导致主库文件只有 4KB、数据全在 `-wal` 里（单独拷 `.db` 会得到空库）。
+已改为 **journal_mode=DELETE**：单文件 `fitbridge.db`，数据全在里面，备份/拷贝只需一个文件。
+
+### 其它实测结论
 
 这几条是动手过程中确认的，写下来避免以后重复踩：
 

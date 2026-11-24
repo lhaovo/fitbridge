@@ -377,3 +377,83 @@ createPlatformClient({
 - **域名白名单**：下载 URL（重定向后）必须落在允许的 host 列表，防 SSRF
 - **熔断**：连续失败自动短路，保护用户账号不被风控
 
+
+
+---
+
+## 六、⚠️ 实测字段名（2026-11-24 真实账号验证）
+
+> 这一节记录**真实接口返回的字段名**，与直觉差别很大。
+> 写在这里是因为：字段名猜错时不会报错，只会静默变成 undefined，
+> 导致「距离/时长/心率全是空的」这种极难排查的问题。
+
+### 迈金 / 顽鹿 OTM
+
+`POST /api/otm/ride_record/list` → `data.list[]`，真实字段：
+
+| 真实字段 | 类型 | 说明 | ★ 易踩的坑 |
+|----------|------|------|------------|
+| `id` | string | 活动 ID | |
+| `name` | string | 活动名 | **实测常为 `null`** → 需自己兜底 |
+| `distance_km` | number | 距离，**公里** | 不是米！误当米会差 1000 倍 |
+| `time_seconds` | number | 时长（秒） | 不是 `ridingTime` |
+| `time_formatted` | string | "2:35:30" 展示串 | |
+| `start_riding_time` | string | "2026-11-21 13:03:35" | **本地时间、无时区** → 按 UTC+8 补齐 |
+| `created_at` | string | "1970-01-01 08:00:00" | 常是 1970，无用 |
+| `avg_speed_kmh` | number | 平均速度 km/h | |
+| `avg_heart_bpm` | number | 平均心率 | 不是 `avgHeartRate` |
+| `avg_power_w` | number | 平均功率 | 不是 `avgPower` |
+| `load_tss` | number | 训练压力 | |
+| `elevation_gain` | number | 爬升 | |
+
+详情 `GET /api/otm/ride_record/analysis/{id}` → `data.ridingRecord`：
+`durl`（七牛直链，**WGS-84**）、`fitUrl`（走 fit_content，**GCJ-02**）。
+★ 同一个平台两个下载通道坐标系不同，必须按文件级标注，不能只看 manifest。
+
+### MyWhoosh
+
+`POST /v2/rider/profile/activities` → `data.results[]`，真实字段：
+
+| 真实字段 | 类型 | 说明 | ★ 易踩的坑 |
+|----------|------|------|------------|
+| `id` | string | 活动 ID | |
+| `title` | string | 活动名 | **没有 `name` 字段** |
+| `routeName` | string | 路线名 | |
+| `sportType` | string | 'cycling' | |
+| `distance` | number | 距离，**公里** | 不是 `distanceKm` |
+| `rideDuration` | string | "02:35:30.000" | 需自己解析 |
+| `date` | number | unix **秒** | 不是字符串！直接用会得到 "1795237415.0" |
+| `startDatetime` | string | ISO | ★ **优先用这个** |
+| `createdAt` | string | ISO | |
+| `heartrate` / `watt` / `elevation` | number | 心率/功率/爬升 | |
+| `activityFileId` | string | 下载必需 | |
+
+**下载路径**（★ 极易写错）：
+
+@@@
+✅ POST https://service14.mywhoosh.com/v2/rider/profile/download-activity-file
+❌ POST https://service14.mywhoosh.com/v2/rider/profile/activities/download-activity-file   → 404
+@@@
+
+### 增量策略：不能用页码游标
+
+两个平台的列表都是**时间倒序**（`sortDate: "DESC"` / 迈金按时间倒排），所以增量应该：
+
+@@@
+since = 上次成功同步时间 - 回看窗口(lookbackHours)
+适配器内部循环翻页，一旦遇到早于 since 的活动就停止翻页
+@@@
+
+**为什么不能用页码游标**：页码的含义会随 `limit` 变化而漂移。
+实测踩过：上次 `limit=10` 记下 `cursor=2`，这次 `limit=20` 从第 2 页开始 → **一条都没拉到**。
+本地幂等键（user + platform + activityId）才是最终保障。
+
+### 引擎侧的两个坑
+
+1. **直接调 `adapter.getActivityDetail` 会丢掉列表项的 `raw`**
+   → 必须走 pipeline 的 `detail()`（合并列表项与详情）。
+   丢了 `raw` 就会丢 `activityFileId`，导致下载全部失败。
+
+2. **适配器抛异常必须带 HTTP 状态码**
+   → 用 `PlatformHttpError`。否则 "401 Unauthorized" 会被判成 unknown，
+   token 过期就不会触发自动重登。

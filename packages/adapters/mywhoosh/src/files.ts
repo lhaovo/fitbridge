@@ -32,8 +32,11 @@ export async function downloadFile(
     );
   }
 
+  // ★ 路径必须是 /v2/rider/profile/download-activity-file
+  //   误写成 /v2/rider/profile/activities/download-activity-file 会 404
+  //   （实测确认；已加回归测试锁定）
   const res = await client.api<{ data?: string; error?: unknown; message?: string }>(
-    '/activities/download-activity-file',
+    '/download-activity-file',
     token,
     { key: whooshId, fileId },
   );

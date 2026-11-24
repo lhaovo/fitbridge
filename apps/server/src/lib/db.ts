@@ -39,8 +39,11 @@ export class Database {
     try {
       mkdirSync(dirname(this.path), { recursive: true });
       this.db = new DatabaseSync(this.path);
-      // WAL：读写并发更好，且崩溃安全
-      this.db.exec('PRAGMA journal_mode = WAL;');
+      // 单用户单进程 → 不需要 WAL 的并发收益。
+      // 用 DELETE 模式让全部数据留在 fitbridge.db 单文件里：
+      //   · 备份/拷贝只需拷一个文件（不会漏掉 -wal 里的数据）
+      //   · 直接用别的工具打开就能看到完整数据，而不是"空库 + 一堆旁文件"
+      this.db.exec('PRAGMA journal_mode = DELETE;');
       this.db.exec('PRAGMA foreign_keys = ON;');
       this.db.exec('PRAGMA busy_timeout = 5000;');
       this.available = true;
@@ -116,6 +119,12 @@ export class Database {
   }
 
   async close(): Promise<void> {
+    // 若是 WAL 模式则先落盘检查点，避免数据留在 -wal 里
+    try {
+      this.db?.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+    } catch {
+      /* 非 WAL 模式会报错，忽略 */
+    }
     this.db?.close();
     this.db = null;
     this.available = false;

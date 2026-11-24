@@ -131,8 +131,35 @@ export interface ActivityStore {
 
   listFiles(activityId: string): Promise<ActivityFileRow[]>;
 
-  /** 标记已同步到某目标 */
-  markSynced(userId: string, activityId: string, targetPlatform: string, remoteId?: string): Promise<void>;
+  /**
+   * 标记已同步到某目标。
+   *
+   * runId 指向 sync_runs 的一行（外键约束）。
+   * 传 undefined 时使用内置的 standalone run。
+   */
+  markSynced(
+    userId: string,
+    activityId: string,
+    targetPlatform: string,
+    remoteId?: string,
+    runId?: string,
+  ): Promise<void>;
+
+  /** 创建一次运行记录（sync_runs） */
+  createRun(input: {
+    runId: string;
+    userId: string;
+    trigger: 'manual' | 'schedule' | 'webhook' | 'api';
+    taskId?: string;
+  }): Promise<void>;
+
+  /** 结束运行记录 */
+  finishRun(input: {
+    runId: string;
+    status: 'success' | 'partial' | 'failed' | 'cancelled';
+    stats?: Record<string, unknown>;
+    error?: string;
+  }): Promise<void>;
 
   /** 增量游标 */
   getSyncState(userId: string, platformId: string): Promise<SyncState | undefined>;

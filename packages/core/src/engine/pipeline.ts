@@ -150,10 +150,16 @@ export async function normalize(
       activityId: activity.remoteId,
       shortCode: adapter.manifest.shortCode,
     },
-    name: activity.name ?? fit?.rawSportType ?? adapter.manifest.displayName,
+    // 名字兜底不能用运动类型（会显示成 "cycling" 这种没信息量的东西）
+    name:
+      activity.name ??
+      (fit?.startTime
+        ? adapter.manifest.displayName + ' ' + fit.startTime.slice(0, 10)
+        : adapter.manifest.displayName),
     sportType: fit?.sportType ?? 'other',
     rawSportType: fit?.rawSportType,
-    startTime: activity.startTime ?? fit?.startTime,
+    // ★ 优先用 FIT 里的绝对时间（UTC）；平台给的本地时间串作为兜底
+    startTime: fit?.startTime ?? activity.startTime,
     timezoneOffsetMin,
     timezoneSource,
     distanceMeters,

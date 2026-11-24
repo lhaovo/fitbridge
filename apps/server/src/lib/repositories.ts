@@ -221,13 +221,73 @@ export class SqliteActivityStore implements ActivityStore {
       }));
   }
 
+  /** 内置的 standalone run（用于没有具体运行上下文的标记） */
+  private static readonly STANDALONE_RUN = 'run-standalone';
+
+  async createRun(input: {
+    runId: string;
+    userId: string;
+    trigger: 'manual' | 'schedule' | 'webhook' | 'api';
+    taskId?: string;
+  }): Promise<void> {
+    this.db.run(
+      'INSERT INTO sync_runs (id, task_id, user_id, trigger, status, started_at) ' +
+        'VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING',
+      [
+        input.runId,
+        input.taskId ?? null,
+        input.userId,
+        input.trigger,
+        'running',
+        new Date().toISOString(),
+      ],
+    );
+  }
+
+  async finishRun(input: {
+    runId: string;
+    status: 'success' | 'partial' | 'failed' | 'cancelled';
+    stats?: Record<string, unknown>;
+    error?: string;
+  }): Promise<void> {
+    this.db.run(
+      'UPDATE sync_runs SET status = ?, finished_at = ?, stats = ?, error = ? WHERE id = ?',
+      [
+        input.status,
+        new Date().toISOString(),
+        JSON.stringify(input.stats ?? {}),
+        input.error ? JSON.stringify({ message: input.error }) : null,
+        input.runId,
+      ],
+    );
+  }
+
+  /** 确保 standalone run 存在（sync_items.run_id 有外键） */
+  private ensureStandaloneRun(userId: string): string {
+    this.db.run(
+      'INSERT INTO sync_runs (id, task_id, user_id, trigger, status, started_at, finished_at) ' +
+        'VALUES (?, NULL, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING',
+      [
+        SqliteActivityStore.STANDALONE_RUN,
+        userId,
+        'manual',
+        'success',
+        new Date().toISOString(),
+        new Date().toISOString(),
+      ],
+    );
+    return SqliteActivityStore.STANDALONE_RUN;
+  }
+
   async markSynced(
-    _userId: string,
+    userId: string,
     activityId: string,
     targetPlatform: string,
     remoteId?: string,
+    runId?: string,
   ): Promise<void> {
     const now = new Date().toISOString();
+    const effectiveRunId = runId ?? this.ensureStandaloneRun(userId);
     const existing = this.db.one<{ id: string }>(
       "SELECT id FROM sync_items WHERE activity_id = ? AND target_platform = ? AND status = 'success'",
       [activityId, targetPlatform],
@@ -243,7 +303,7 @@ export class SqliteActivityStore implements ActivityStore {
           ' status, remote_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
         [
           randomUUID(),
-          'manual',
+          effectiveRunId,
           activityId,
           '',
           targetPlatform,

@@ -4,7 +4,7 @@ import type { ActivityStore, EventSink, SyncItemInput } from '../ports/repositor
 import type { FileStore } from '../ports/file-store.js';
 import { PlatformError, normalizeError } from './errors.js';
 import { relogin } from '../domain/credential.js';
-import { normalize } from './pipeline.js';
+import { detail as detailOf, normalize } from './pipeline.js';
 
 /**
  * 同步引擎。
@@ -101,6 +101,8 @@ export interface RunSyncOptions {
   task: SyncTaskSpec;
   userId: string;
   deps: SyncRunDeps;
+  /** 触发来源 */
+  trigger?: 'manual' | 'schedule' | 'webhook' | 'api';
   /** dryRun：只做发现与去重预览，不下载不落库不上传 */
   dryRun?: boolean;
   onProgress?: (p: {
@@ -129,6 +131,13 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
     perPlatform: {},
     errors: [],
   };
+
+  // 登记本次运行（sync_items.run_id 有外键，必须先有 run 行）
+  await deps.store.createRun({
+    runId,
+    userId,
+    trigger: opts.trigger ?? 'manual',
+  });
 
   /** 本次处理过的活动（用于上传阶段） */
   const processed: { activityId: string; sourcePlatform: string; kind: 'fit' | 'gpx' | 'tcx'; blobKey: string; name: string; startTime?: string; sportType: string; timezoneOffsetMin?: number }[] = [];
@@ -182,10 +191,20 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
     }
 
     // ② Discover
-    let cursor: string | undefined;
+    //
+    // 增量方式：**时间回看窗口**，不用页码游标。
+    //   since = 上次成功时间 - lookbackHours
+    // 平台列表是时间倒序的，适配器遇到早于 since 的就停止翻页。
+    // 回看窗口用来覆盖「平台延迟入库」和「上次同步中途失败」。
+    let since: string | undefined;
     if (policy.incremental) {
       const state = await deps.store.getSyncState(userId, platformId);
-      cursor = state?.lastCursor;
+      if (state?.lastSuccessAt) {
+        const lookbackMs = policy.lookbackHours * 3600 * 1000;
+        since = new Date(
+          Date.parse(state.lastSuccessAt) - lookbackMs,
+        ).toISOString();
+      }
     }
 
     let remotes;
@@ -193,7 +212,11 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
       remotes = await withAuthRetry(
         adapter,
         cred,
-        () => adapter.listActivities(cred, { cursor, limit: policy.maxItemsPerRun }),
+        () =>
+          adapter.listActivities(cred, {
+            since,
+            limit: policy.maxItemsPerRun,
+          }),
         deps,
         platformId,
       );
@@ -253,13 +276,13 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
       }
 
       try {
+        // ★ 用 pipeline 的 detail()，它会把列表项与详情合并（保留 raw）
+        //   直接调 adapter.getActivityDetail 会丢掉列表项里的 raw，
+        //   导致 MyWhoosh 的 activityFileId 丢失。
         const detail = await withAuthRetry(
           adapter,
           cred,
-          async () =>
-            adapter.getActivityDetail
-              ? adapter.getActivityDetail(cred, remote.remoteId)
-              : { ...remote },
+          async () => detailOf(adapter, cred, remote),
           deps,
           platformId,
         );
@@ -353,13 +376,13 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
       }
     }
 
-    // 更新增量游标
-    if (!opts.dryRun && policy.incremental && remotes.cursor) {
+    // 更新增量状态（时间为准；lastCursor 保留给未来支持真游标的平台）
+    if (!opts.dryRun) {
       await deps.store.setSyncState(userId, platformId, {
-        lastCursor: remotes.cursor,
         lastSyncAt: now.toISOString(),
         lastSuccessAt: stat.failed === 0 ? now.toISOString() : undefined,
         lookbackSec: policy.lookbackHours * 3600,
+        ...(remotes.cursor ? { lastCursor: remotes.cursor } : {}),
       });
     }
   }
@@ -430,7 +453,13 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
           );
         }
 
-        await deps.store.markSynced(userId, item.activityId, targetId, result.remoteId);
+        await deps.store.markSynced(
+          userId,
+          item.activityId,
+          targetId,
+          result.remoteId,
+          runId,
+        );
         const st = summary.perPlatform[targetId] ??
           (summary.perPlatform[targetId] = {
             discovered: 0, downloaded: 0, skipped: 0, failed: 0, uploaded: 0, uploadFailed: 0,
@@ -470,6 +499,27 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
       }
     }
   }
+
+  // 结束运行记录
+  const runStatus =
+    summary.failed === 0 && summary.uploadFailed === 0
+      ? 'success'
+      : summary.downloaded > 0 || summary.uploaded > 0
+        ? 'partial'
+        : 'failed';
+  await deps.store.finishRun({
+    runId,
+    status: runStatus,
+    stats: {
+      discovered: summary.discovered,
+      downloaded: summary.downloaded,
+      skipped: summary.skipped,
+      failed: summary.failed,
+      uploaded: summary.uploaded,
+      uploadFailed: summary.uploadFailed,
+    },
+    error: summary.errors.length ? summary.errors.join('; ') : undefined,
+  });
 
   opts.onProgress?.({ phase: 'done', message: '同步完成' });
   return summary;

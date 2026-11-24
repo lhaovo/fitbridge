@@ -81,10 +81,25 @@ class MemStore implements ActivityStore {
   async listFiles(activityId: string) {
     return this.files.filter((f) => f.activityId === activityId);
   }
-  async markSynced(_u: string, activityId: string, target: string, remoteId?: string) {
+  runs: Array<{ runId: string; status: string }> = [];
+
+  async createRun(input: { runId: string }) {
+    this.runs.push({ runId: input.runId, status: 'running' });
+  }
+  async finishRun(input: { runId: string; status: string }) {
+    const r = this.runs.find((x) => x.runId === input.runId);
+    if (r) r.status = input.status;
+  }
+  async markSynced(
+    _u: string,
+    activityId: string,
+    target: string,
+    remoteId?: string,
+    runId?: string,
+  ) {
     const a = [...this.activities.values()].find((x) => x.id === activityId);
     if (a && !a.syncedTargets.includes(target)) a.syncedTargets.push(target);
-    this.items.push({ activityId, target, remoteId });
+    this.items.push({ activityId, target, remoteId, runId });
   }
   async getSyncState(_u: string, platformId: string) {
     return this.states.get(platformId);
@@ -453,6 +468,18 @@ describe('同步引擎', () => {
     expect(store.states.get('src')?.lastCursor).toBe('2');
   });
 
+  it('创建并结束运行记录（sync_items.run_id 外键需要）', async () => {
+    const src = makeSource();
+    const r = await runSync({
+      task: { sourcePlatforms: ['src'], targetPlatforms: [], filters: {}, policy: DEFAULT_SYNC_POLICY },
+      userId: 'default',
+      deps: deps([src]),
+    });
+    expect(store.runs).toHaveLength(1);
+    expect(store.runs[0]!.runId).toBe(r.runId);
+    expect(store.runs[0]!.status).toBe('success');
+  });
+
   it('过滤器：日期范围与关键词', async () => {
     const src = makeSource();
     const r = await runSync({
@@ -466,5 +493,83 @@ describe('同步引擎', () => {
       deps: deps([src]),
     });
     expect(r.downloaded).toBe(1);
+  });
+});
+
+describe('增量：时间回看窗口（不用页码游标）', () => {
+  it('把 since 传给适配器（= 上次成功时间 - 回看窗口）', async () => {
+    const seen: Array<string | undefined> = [];
+    const src: PlatformAdapter = {
+      ...makeSource(),
+      async listActivities(_c, opts) {
+        seen.push(opts?.since);
+        return { items: [], hasMore: false };
+      },
+    } as PlatformAdapter;
+
+    const store2 = new MemStore();
+    await store2.setSyncState('default', 'src', {
+      lastSuccessAt: '2026-11-20T00:00:00.000Z',
+      lookbackSec: 86400,
+    });
+
+    await runSync({
+      task: {
+        sourcePlatforms: ['src'],
+        targetPlatforms: [],
+        filters: {},
+        policy: { ...DEFAULT_SYNC_POLICY, incremental: true, lookbackHours: 24 },
+      },
+      userId: 'default',
+      deps: {
+        adapters: new Map([['src', src]]),
+        credentials: async () => ({
+          id: 'c1',
+          userId: 'default',
+          platformId: 'src',
+          secret: { token: 't' },
+        }),
+        files: new MemFiles(),
+        store: store2,
+        events: new MemEvents(),
+      },
+    });
+
+    expect(seen[0]).toBe('2026-11-19T00:00:00.000Z');
+  });
+
+  it('没有上次同步记录时不传 since（全量）', async () => {
+    const seen: Array<string | undefined> = [];
+    const src: PlatformAdapter = {
+      ...makeSource(),
+      async listActivities(_c, opts) {
+        seen.push(opts?.since);
+        return { items: [], hasMore: false };
+      },
+    } as PlatformAdapter;
+
+    await runSync({
+      task: {
+        sourcePlatforms: ['src'],
+        targetPlatforms: [],
+        filters: {},
+        policy: { ...DEFAULT_SYNC_POLICY, incremental: true },
+      },
+      userId: 'default',
+      deps: {
+        adapters: new Map([['src', src]]),
+        credentials: async () => ({
+          id: 'c1',
+          userId: 'default',
+          platformId: 'src',
+          secret: { token: 't' },
+        }),
+        files: new MemFiles(),
+        store: new MemStore(),
+        events: new MemEvents(),
+      },
+    });
+
+    expect(seen[0]).toBeUndefined();
   });
 });

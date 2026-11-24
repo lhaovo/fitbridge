@@ -97,7 +97,63 @@ describe('迈金活动列表', () => {
     expect(page.items[0]!.distanceMeters).toBe(25000);
     expect(page.items[0]!.durationSec).toBe(3600);
     expect(page.hasMore).toBe(true);
-    expect(page.cursor).toBe('2');
+    // ★ 不再返回页码游标（页码含义会随 limit 漂移），增量改用时间回看窗口
+    expect(page.cursor).toBeUndefined();
+  });
+
+  it('增量：since 之后遇到更早的活动就停止翻页', async () => {
+    const calls: FetchCall[] = [];
+    vi.stubGlobal('fetch', async (url: string | URL, init: RequestInit = {}) => {
+      calls.push({ url: String(url), init });
+      const body = JSON.parse(String(init.body));
+      // 第 1 页：一条新的 + 一条旧的（早于 since）
+      const list =
+        body.page === 1
+          ? [
+              { id: 900, title: '新', distance_km: 10, time_seconds: 600, start_riding_time: '2026-11-21 10:00:00' },
+              { id: 800, title: '旧', distance_km: 20, time_seconds: 900, start_riding_time: '2026-01-01 10:00:00' },
+            ]
+          : [];
+      return new Response(
+        JSON.stringify({ code: 200, data: { list, pagination: { has_more: true } } }),
+        { status: 200 },
+      );
+    });
+
+    const adapter = new OtmAdapter();
+    const page = await adapter.listActivities(
+      {
+        id: 'c1',
+        userId: 'u1',
+        platformId: 'otm',
+        secret: { token: 'jwt-token' },
+      },
+      { limit: 50, since: '2026-11-01T00:00:00.000Z' },
+    );
+
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]!.remoteId).toBe('900');
+    // 只请求了第 1 页，没有继续翻页
+    expect(calls.length).toBe(1);
+    expect(page.hasMore).toBe(false);
+  });
+
+  it('距离是公里不是米', async () => {
+    mockJson({
+      code: 200,
+      data: {
+        list: [{ id: 1, distance_km: 36.91, time_seconds: 9330, start_riding_time: '2026-11-21 13:03:35' }],
+        pagination: {},
+      },
+    });
+    const adapter = new OtmAdapter();
+    const page = await adapter.listActivities(
+      { id: 'c1', userId: 'u1', platformId: 'otm', secret: { token: 't' } },
+      { limit: 10 },
+    );
+    expect(page.items[0]!.distanceMeters).toBeCloseTo(36910, 0);
+    expect(page.items[0]!.durationSec).toBe(9330);
+    expect(page.items[0]!.startTime).toBe('2026-11-21T05:03:35.000Z');
   });
 
   it('带 Authorization 头', async () => {

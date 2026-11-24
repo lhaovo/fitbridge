@@ -200,10 +200,9 @@ export function detectFileKind(
   const head = Buffer.from(
     content.subarray(0, Math.min(content.length, 512)),
   ).toString('utf8');
-  if (head.includes('<?xml') || head.includes('<gpx')) {
-    return head.includes('<TrainingCenterDatabase') ? 'tcx' : 'gpx';
-  }
-  if (head.startsWith('{') || head.startsWith('[')) return 'gpx'; // JSON 轨迹
+  if (head.includes('<TrainingCenterDatabase')) return 'tcx';
+  if (head.includes('<gpx')) return 'gpx';
+  // 其它 XML（不含 gpx 根节点）与 JSON 一律 unknown —— 不能把任意 JSON 当成 GPX
   return 'unknown';
 }
 

@@ -143,7 +143,19 @@ export interface PlatformAdapter {
   // ── 读取 ────────────────────────────────────────────────
   listActivities(
     cred: Credential,
-    opts?: { cursor?: string; limit?: number },
+    opts?: {
+      cursor?: string;
+      limit?: number;
+      /**
+       * 只取这个时间之后（ISO）的活动。
+       *
+       * 平台的列表通常是**按时间倒序**的，所以适配器可以「遇到早于 since 的就停止翻页」，
+       * 既省请求又不漏（配合本地回看窗口覆盖延迟入库）。
+       *
+       * ★ 不要用页码当增量游标 —— 页码的含义会随 limit 变化而漂移。
+       */
+      since?: string;
+    },
   ): Promise<Paged<RemoteActivity>>;
   getActivityDetail?(
     cred: Credential,

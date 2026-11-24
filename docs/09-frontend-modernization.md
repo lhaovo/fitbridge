@@ -99,7 +99,93 @@ Cookie 仍是 `httpOnly + SameSite=Lax + Path=/`，**没有 `__Host-` 前缀 / `
 
 ---
 
-## 三、顺带挖出的 2 个真 bug
+## 三、界面美化 + 深浅色主题
+
+> 2026-11-24 追加。用户要求：美化界面、可切换深浅色、**默认浅色**。
+
+### 3.1 主题机制（按 `dark-mode` / `dark-mode-toggle` 指南实现）
+
+```
+① <meta name="color-scheme" content="light dark">     声明支持两种方案
+② 内联脚本（紧跟 meta，非 module/defer）               防 FOUC
+③ :root { color-scheme: light dark }                    ← 基础值必须保持 light dark
+④ :root:has(> head > meta[...][content="dark"]) {...}  把 meta 映射回 CSS 属性
+⑤ 所有语义色用 light-dark() 写一次                     自动跟随 color-scheme
+```
+
+关键点（指南原文）：
+
+- *"The `<meta>` is only a *presentational hint*: any `color-scheme` declaration in author CSS
+  overrides it."* → 只改 meta 不生效，**必须**用 `:has()` 把 meta 映射回属性。
+- *"DO NOT hardcode `color-scheme: light` or `color-scheme: dark` as the root default;
+  the base declaration MUST stay `light dark`."* → 基础声明保持 `light dark`。
+- *"CSS MUST NOT depend on JS: if JS never runs, the `<meta>` stays `light dark`
+  and the site follows the system preference — nothing breaks."*
+
+**默认浅色**的实现：内联脚本里 `localStorage.getItem('color-scheme') || 'light'`。
+没有存储值时 meta 写成 `light` → `:has()` 把它映射成 `color-scheme: light` → 页面浅色。
+所以「默认浅色」和「meta 保持 light dark 的能力」两者兼得。
+
+切换时同时更新两处：
+- `<meta name="color-scheme">` → 驱动 `light-dark()`
+- `<html data-theme>` → 给**不支持 `light-dark()` 的老浏览器**兜底
+  （`@supports not (color: light-dark(white, black))` 块里用 `[data-theme]` 切换）
+
+其它细节：
+- `theme-color` meta 跟着变（移动端浏览器地址栏）
+- 按钮的 `aria-label` / `title` 会说明「点了会变成什么」
+- 跨标签页同步：监听 `storage` 事件
+- 切换按钮用**事件委托**，登录页和主界面各有一个都能用
+
+### 3.2 浏览器原生 UI 也跟着主题走
+
+| 手段 | 作用 |
+|---|---|
+| `color-scheme` | 滚动条、表单控件、日期选择器、canvas 底色 |
+| `accent-color: var(--brand)` | 复选框 / 单选框 / 滑块的选中色 |
+| `scrollbar-color` | 自定义滚动条（thumb 与 track 对比度 ≥3:1） |
+| `::selection` | 选中文本高亮 |
+
+> 注意：**不能给 `scrollbar-color` 加过渡动画**（WebKit bug 311752 会导致闪烁），
+> 本项目也没有动画它。
+
+### 3.3 对比度全部实测过
+
+| 项 | 浅色 | 深色 | 要求 |
+|---|---|---|---|
+| 正文 / 页面底 | 16.40 | 16.43 | ≥4.5 ✅ |
+| 次要文字 / 卡片底 | 5.51 | 6.96 | ≥4.5 ✅ |
+| 品牌色 / 卡片底 | 5.17 | 6.52 | ≥4.5 ✅ |
+| ok / 卡片底 | 5.02 | 10.19 | ≥4.5 ✅ |
+| warn / 卡片底 | 5.02 | 10.64 | ≥4.5 ✅ |
+| danger / 卡片底 | 4.83 | 6.42 | ≥4.5 ✅ |
+| 输入框边框 / 卡片底 | 3.12 | 3.18 | ≥3（WCAG 1.4.11 非文本）✅ |
+| 滚动条 thumb / track | 3.01 | 3.24 | ≥3 ✅ |
+| 图表 5 条线 / 图表底 | 4.41 ~ 6.37 | 6.61 ~ 10.95 | ≥3 ✅ |
+
+> 输入框边框单独用 `--border-input`（≥3:1）—— 边框是「这个框是个输入框」的
+> **唯一**视觉线索，必须够；卡片/分隔线用更柔的 `--border` 无妨。
+> 图表线条也跟着主题换色：浅色底用 blue-700 / green-700 这类深色，
+> 深色底用 blue-400 / green-400 这类亮色（原来的 `#22c55e` 在浅色底上只有 2.1:1）。
+
+### 3.4 视觉改动清单
+
+- **顶栏**：毛玻璃（`backdrop-filter`）+ 半透明底 + 更紧凑的圆角按钮
+- **卡片**：分层阴影（`--shadow-1/2/3`）、更大的圆角（12px）、平台卡片 hover 抬升
+- **按钮**：primary 填充 / default 描边 / ghost 三档，hover/active 有反馈
+- **输入框**：3px 品牌色焦点环、hover 变色；用 `:user-invalid` 而不是 `:invalid`
+  （后者会在页面加载时就把空的必填项标红）
+- **chips（平台选择）**：胶囊形，选中时品牌色描边 + 浅色底
+- **表格**：有边框的滚动容器、粘性表头、hover 行高亮、空态用虚线框
+- **徽标 / 标签**：柔和底色 + 同色系描边（ok/warn/danger 各一套）
+- **图表**：SVG 里的硬编码颜色全部换成 CSS 变量，跟着主题走
+- **Toast**：入场动画 + 左侧色条
+- **焦点圈**：统一 `:focus-visible`，鼠标点击不显示
+- **动效**：全部带 `prefers-reduced-motion` 兜底
+
+---
+
+## 四、顺带挖出的 2 个真 bug
 
 改造过程中用「真实鼠标点击 + 网络抓包」实测，暴露了两个之前没发现的问题：
 
@@ -133,7 +219,7 @@ fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts, body: ...
 
 ---
 
-## 四、复查结果
+## 五、复查结果
 
 | 检查 | 改前 | 改后 |
 |---|---|---|
@@ -148,7 +234,7 @@ fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts, body: ...
 
 ---
 
-## 五、刻意没做的事
+## 六、刻意没做的事
 
 | 没做 | 原因 |
 |---|---|

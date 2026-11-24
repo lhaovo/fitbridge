@@ -3,8 +3,24 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="color-scheme" content="dark" />
-<meta name="theme-color" content="#0f1115" />
+<!--
+  ★ 声明支持浅色 + 深色两种方案。
+  这个 meta 在 CSS 加载前就生效，用来避免「先闪一下默认主题再切过来」。
+-->
+<meta name="color-scheme" content="light dark" />
+<!--
+  FOUC 预防脚本：必须紧跟在 meta 后面，且**不能**是 type="module" / defer。
+  它只做一件事：把上次的偏好写回 meta。
+  默认浅色（存了值就用存的值）。
+-->
+<script>
+try {
+  var m = document.querySelector('meta[name="color-scheme"]');
+  m.content = localStorage.getItem('color-scheme') || 'light';
+  document.documentElement.dataset.theme = m.content;
+} catch (e) { /* 隐私模式等场景：localStorage 可能不可用，忽略即可 */ }
+</script>
+<meta name="theme-color" content="#f4f6fa" />
 <title>FitBridge</title>
 <link rel="stylesheet" href="/app.css" />
 </head>
@@ -20,6 +36,16 @@
 <!-- ── 登录 ─────────────────────────────────────────────── -->
 <template id="tpl-login">
   <div class="login card">
+    <button id="theme-toggle" class="icon-btn theme-toggle-float" type="button"
+            aria-label="切换深浅色主题" title="切换深浅色主题">
+      <svg class="icon icon-sun" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5.2 5.2l1.8 1.8M17 17l1.8 1.8M18.8 5.2L17 7M7 17l-1.8 1.8"/>
+      </svg>
+      <svg class="icon icon-moon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M20.5 14.6A8.6 8.6 0 0 1 9.4 3.5a8.6 8.6 0 1 0 11.1 11.1Z"/>
+      </svg>
+    </button>
     <h1 class="login-title">FitBridge</h1>
     <p class="hint" style="margin-bottom:14px">多平台运动数据同步 · 单用户自托管</p>
     <form id="login-form">
@@ -40,6 +66,16 @@
     <span class="badge" id="health">连接中…</span>
     <div class="spacer"></div>
     <span class="badge" id="mode">单用户 · 自托管</span>
+    <button id="theme-toggle" class="icon-btn" type="button"
+            aria-label="切换深浅色主题" title="切换深浅色主题">
+      <svg class="icon icon-sun" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5.2 5.2l1.8 1.8M17 17l1.8 1.8M18.8 5.2L17 7M7 17l-1.8 1.8"/>
+      </svg>
+      <svg class="icon icon-moon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M20.5 14.6A8.6 8.6 0 0 1 9.4 3.5a8.6 8.6 0 1 0 11.1 11.1Z"/>
+      </svg>
+    </button>
     <button id="logout">退出</button>
   </header>
 

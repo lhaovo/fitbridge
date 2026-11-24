@@ -20,12 +20,16 @@ const DETAIL = {
   overlays: [],
 };
 
+/*
+ * 图表配色用 CSS 变量（light-dark()），跟着主题走。
+ * 浅色底上要够深才能满足 3:1 的非文本对比度，深色底上要够亮。
+ */
 const CHART_COLOR = {
-  speed: '#3b82f6',
-  hr: '#ef4444',
-  power: '#22c55e',
-  cadence: '#a855f7',
-  alt: '#f59e0b',
+  speed: 'var(--chart-speed)',
+  hr: 'var(--chart-hr)',
+  power: 'var(--chart-power)',
+  cadence: 'var(--chart-cadence)',
+  alt: 'var(--chart-alt)',
 };
 
 const TZ_SOURCE_LABEL = {
@@ -350,9 +354,9 @@ function trackBlock(track) {
 function svgTrack() {
   const sets = [];
   const mainPts = (DETAIL.track && DETAIL.track.track) || [];
-  sets.push({ label: '当前活动', points: mainPts, color: '#3b82f6', width: 2.2 });
+  sets.push({ label: '当前活动', points: mainPts, color: 'var(--chart-speed)', width: 2.2 });
   for (const o of DETAIL.overlays) {
-    sets.push({ label: o.label, points: o.points, color: '#f59e0b', width: 2, dash: '6 4' });
+    sets.push({ label: o.label, points: o.points, color: 'var(--chart-alt)', width: 2, dash: '6 4' });
   }
   const all = [];
   for (const s of sets) {
@@ -395,9 +399,9 @@ function svgTrack() {
       const a0 = p2[0], a1 = p2[p2.length - 1];
       paths.push(
         '<circle cx="' + X(a0.lon).toFixed(1) + '" cy="' + Y(a0.lat).toFixed(1) +
-          '" r="4" fill="#22c55e" stroke="#0f1115" stroke-width="1.5"/>' +
+          '" r="4" fill="var(--ok)" stroke="var(--chart-track)" stroke-width="1.5"/>' +
           '<circle cx="' + X(a1.lon).toFixed(1) + '" cy="' + Y(a1.lat).toFixed(1) +
-          '" r="4" fill="#ef4444" stroke="#0f1115" stroke-width="1.5"/>',
+          '" r="4" fill="var(--danger)" stroke="var(--chart-track)" stroke-width="1.5"/>',
       );
     }
   }
@@ -411,13 +415,13 @@ function svgTrack() {
           '（' + s.points.length + ' 点）</span>',
       )
       .join('') +
-    '<span class="lg"><i style="background:#22c55e"></i>起点</span>' +
-    '<span class="lg"><i style="background:#ef4444"></i>终点</span>' +
+    '<span class="lg"><i style="background:var(--ok)"></i>起点</span>' +
+    '<span class="lg"><i style="background:var(--danger)"></i>终点</span>' +
     '</div>';
 
   return (
     '<svg viewBox="0 0 ' + W + ' ' + H + '" class="svg-track" preserveAspectRatio="xMidYMid meet" role="img" aria-label="活动轨迹图">' +
-    '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#12151b" rx="8"/>' +
+    '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="var(--chart-track)" rx="8"/>' +
     paths.join('') +
     '</svg>' + legend
   );
@@ -469,9 +473,9 @@ function svgSeries(s, color) {
       const v = max - r * (max - min);
       return (
         '<line x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (W - PR) + '" y2="' + y.toFixed(1) +
-        '" stroke="#262b35" stroke-width="1"/>' +
+        '" stroke="var(--chart-grid)" stroke-width="1"/>' +
         '<text x="' + (W - PR + 5) + '" y="' + (y + 3.5).toFixed(1) +
-        '" fill="#7c869a" font-size="9.5">' + dnum(v, v >= 100 ? 0 : 1) + '</text>'
+        '" fill="var(--chart-axis)" font-size="9.5">' + dnum(v, v >= 100 ? 0 : 1) + '</text>'
       );
     })
     .join('');
@@ -482,8 +486,8 @@ function svgSeries(s, color) {
     grid +
     '<path d="' + area + '" fill="' + color + '" opacity="0.13"/>' +
     '<path d="' + line + '" fill="none" stroke="' + color + '" stroke-width="1.6" stroke-linejoin="round"/>' +
-    '<text x="' + PL + '" y="' + (H - 5) + '" fill="#7c869a" font-size="9.5">0</text>' +
-    '<text x="' + (W - PR) + '" y="' + (H - 5) + '" fill="#7c869a" font-size="9.5" text-anchor="end">' +
+    '<text x="' + PL + '" y="' + (H - 5) + '" fill="var(--chart-axis)" font-size="9.5">0</text>' +
+    '<text x="' + (W - PR) + '" y="' + (H - 5) + '" fill="var(--chart-axis)" font-size="9.5" text-anchor="end">' +
     fmtDur(tMax) + '</text>' +
     '</svg>'
   );

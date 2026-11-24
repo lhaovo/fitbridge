@@ -156,6 +156,58 @@ function toast(message, level = 'info') {
   setTimeout(() => el.remove(), level === 'err' ? 9000 : 4000);
 }
 
+/* ── 主题（浅色 / 深色）────────────────────────────────────
+ *
+ * 状态存 localStorage，默认浅色。
+ * 切换时同时更新两处：
+ *   <meta name="color-scheme">  → 驱动 CSS 里的 light-dark()
+ *   <html data-theme>           → 给不支持 light-dark() 的老浏览器兜底
+ * 内联脚本（index.html）在 CSS 之前已经设过一次，这里只做同步。
+ */
+const THEME_KEY = 'color-scheme';
+
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+}
+
+function applyTheme(theme, persist) {
+  const t = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = t;
+
+  const meta = document.querySelector('meta[name="color-scheme"]');
+  if (meta) meta.content = t;
+  // 移动端浏览器地址栏也跟着变
+  const tc = document.querySelector('meta[name="theme-color"]');
+  if (tc) tc.content = t === 'dark' ? '#0b0e14' : '#f4f6fa';
+
+  // 切换按钮的文案要说明「点了会变成什么」
+  $$('#theme-toggle').forEach((b) => {
+    b.setAttribute('aria-label', t === 'dark' ? '切换到浅色主题' : '切换到深色主题');
+    b.setAttribute('title', t === 'dark' ? '切换到浅色主题' : '切换到深色主题');
+  });
+
+  if (persist) {
+    try { localStorage.setItem(THEME_KEY, t); } catch { /* 隐私模式：忽略 */ }
+  }
+}
+
+function initTheme() {
+  applyTheme(currentTheme(), false);
+
+  // 用事件委托：登录页和主界面各有一个切换按钮，谁先渲染都能用
+  document.addEventListener('click', (e) => {
+    const btn = e.target instanceof Element && e.target.closest('#theme-toggle');
+    if (!btn) return;
+    applyTheme(currentTheme() === 'dark' ? 'light' : 'dark', true);
+  });
+
+  // 另一个标签页改了主题 → 这里跟着变
+  window.addEventListener('storage', (e) => {
+    if (e.key !== THEME_KEY || !e.newValue) return;
+    applyTheme(e.newValue, false);
+  });
+}
+
 /* ── 登录 ───────────────────────────────────────────────── */
 function renderLogin(msg) {
   const root = $('#app');
@@ -542,7 +594,7 @@ function platformCard(p) {
       ? '<span class="tag warn">逆向接口</span>'
       : '<span class="tag">' + esc(p.access) + '</span>';
   return `
-    <div class="card" data-pid="${esc(p.id)}">
+    <div class="card interactive" data-pid="${esc(p.id)}">
       <h3>${esc(p.displayName)}
         <span class="badge ${p.riskLevel === 'high' ? 'danger' : p.riskLevel === 'medium' ? 'warn' : 'ok'}">${esc(p.riskLevel)}</span>
       </h3>
@@ -671,6 +723,8 @@ async function loadConnections() {
 }
 
 /* ── 启动 ───────────────────────────────────────────────── */
+initTheme();
+
 async function boot() {
   try {
     const me = await api('/auth/me');

@@ -111,9 +111,16 @@ try {
           <label for="max-items" style="margin:0">条数上限</label>
           <input id="max-items" name="maxItems" type="number" value="50" min="1" max="500" style="width:90px" />
           <label class="chip" style="margin-left:6px"><input type="checkbox" id="force" /> 全量重拉</label>
-          <label class="chip" title="上传后回查目标平台列表，确认真的入库了再算成功。关掉会更快，但平台静默丢弃文件时会误报成功。">
-            <input type="checkbox" id="verify-upload" checked /> 上传后回查确认入库
+          <label class="chip">
+            <input type="checkbox" id="verify-upload" checked
+                   aria-describedby="verify-upload-hint"
+                   title="上传后回查目标平台列表，确认真的入库了再算成功。关掉会更快，但平台静默丢弃文件时会误报成功。" />
+            上传后回查确认入库
           </label>
+          <p id="verify-upload-hint" class="visually-hidden">
+            上传后回查目标平台列表，确认活动真的入库了才算成功。关闭会更快，
+            但目标平台静默丢弃文件时会误报成功。
+          </p>
           <div class="spacer" style="flex:1"></div>
           <button id="dry" type="button">预览（不写入）</button>
           <button class="primary" id="run" type="button">同步到本地库</button>

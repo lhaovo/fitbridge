@@ -125,6 +125,31 @@ Verify return code: 0 (ok)     ← 这次是真的（有证书）
 
 ---
 
+### 2.1 前端：把「网络不通」做成用户能直接行动的信息
+
+网络故障是**持续状态**，不是一次性事件，所以前端按 modern-web-guidance 的
+`persistent-toast-notifications` 重做了通知层：
+
+| 要求 | 实现 |
+|---|---|
+| 通知不能自己消失 | `popover="manual"` —— 浏览器不会自动关，必须显式关闭或脚本关闭 |
+| 顶栏状态 | `#net` 徽章（`role="status"`），只在**状态变化时**改 DOM，避免每 60s 重复播报 |
+| 登录页提示 | `#net-note` 内联提示：「这不是账号密码问题 —— 请检查本机网络 / 代理节点」 |
+| 通知容器 | `.toast-host` 带 `role="region" aria-label="通知"`，所有通知在同一容器里 |
+| 关闭按钮 | `popovertargetaction="hide"` + `popovertarget=<id>`，键盘可达、不抢焦点 |
+| 读屏播报 | `ariaNotify(message)`（只播报正文，不念按钮名） |
+| 退出动画 | `transition-behavior: allow-discrete` **独立声明**（不能塞进 `transition` 简写） |
+| 堆叠 | popover 在 Top Layer，父容器的 flex / z-index 不生效 → 每个 toast 单独算 `inset-block-end` |
+
+顺带修掉两个实测出来的 UI 缺陷：
+
+- 关闭按钮压住正文 → toast 右侧留出 `padding-inline-end: 36px`
+- **窄屏顶栏横向溢出**（`退出` 按钮被切掉）→ 页面被撑到 446px，连带 toast 也超出视口；
+  修复：顶栏 `flex-wrap: wrap` + 窄屏隐藏 `#mode`/`#health` 徽章，
+  实测 `scrollWidth === clientWidth === 390`（无横向溢出）
+
+---
+
 ## 3. 用户侧怎么修
 
 **换代理节点 / 重启 Clash**，然后：

@@ -138,22 +138,105 @@ function askConfirm(text, opts = {}) {
   });
 }
 
-/** 轻量通知，替代原生 alert()（alert 会阻塞整个事件循环） */
-function toast(message, level = 'info') {
+/* ── 通知（Toast）─────────────────────────────────────────
+ *
+ * 替代原生 alert()（alert 会阻塞整个事件循环）。
+ *
+ * 实现遵循 modern-web-guidance / persistent-toast-notifications：
+ *   ① popover="manual" —— 通知不会被浏览器自动关掉，必须显式关闭
+ *      （或由脚本按业务需要定时关闭）。低频、重要的事件保持常驻。
+ *   ② 每个 toast 独立定位 —— popover 进入 Top Layer，父容器的
+ *      flex 布局和 z-index 都不生效，必须自己算 inset-block-end。
+ *   ③ 关闭按钮用 popovertargetaction="hide"（原生行为，键盘可达，
+ *      且不抢焦点）。
+ *   ④ 用 ariaNotify() 播报；不支持该 API 时退回 role=status/alert。
+ *   ⑤ 过渡用 transition-behavior: allow-discrete（独立声明），
+ *      这样退出动画也能跑完再真正移除节点。
+ */
+const SUPPORTS_POPOVER = typeof HTMLElement.prototype.showPopover === 'function';
+let toastSeq = 0;
+
+function toastHost() {
   let host = $('.toast-host');
   if (!host) {
     host = document.createElement('div');
     host.className = 'toast-host';
+    // 所有通知都在同一个可定位的区域里，读屏用户能一致地找到
     host.setAttribute('role', 'region');
     host.setAttribute('aria-label', '通知');
     document.body.appendChild(host);
   }
+  return host;
+}
+
+/** 重排 toast 的堆叠位置（新的在最下面，最贴近屏幕角落） */
+function layoutToasts() {
+  const list = $$('.toast-host .toast').reverse();
+  let offset = 20;
+  for (const t of list) {
+    t.style.setProperty('--toast-bottom', offset + 'px');
+    offset += t.getBoundingClientRect().height + 8;
+  }
+}
+
+/**
+ * @param {string} message 正文
+ * @param {'info'|'ok'|'warn'|'err'} level
+ * @param {{persistent?: boolean}} opts persistent=true 时不自动消失
+ * @returns {HTMLElement} toast 元素（可用于手动关闭）
+ */
+function toast(message, level = 'info', opts = {}) {
+  const persistent = opts.persistent === true;
+  const host = toastHost();
+
   const el = document.createElement('div');
+  const id = 'toast-' + ++toastSeq;
+  el.id = id;
   el.className = 'toast ' + level;
   el.setAttribute('role', level === 'err' ? 'alert' : 'status');
-  el.textContent = message;
+  if (SUPPORTS_POPOVER) el.setAttribute('popover', 'manual');
+
+  const body = document.createElement('div');
+  body.className = 'toast-body';
+  body.textContent = message;
+  el.appendChild(body);
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'toast-x';
+  btn.setAttribute('popovertarget', id);
+  btn.setAttribute('popovertargetaction', 'hide');
+  btn.setAttribute('aria-label', '关闭通知');
+  btn.textContent = '\u00d7';
+  btn.addEventListener('click', () => {
+    // 有 popover 时由 toggle(closed) 统一移除；没有则直接移除
+    if (!SUPPORTS_POPOVER) { el.remove(); layoutToasts(); }
+  });
+  el.appendChild(btn);
+
   host.appendChild(el);
-  setTimeout(() => el.remove(), level === 'err' ? 9000 : 4000);
+
+  if (SUPPORTS_POPOVER) {
+    el.addEventListener('toggle', (e) => {
+      if (e.newState === 'closed') { el.remove(); layoutToasts(); }
+    });
+    try { el.showPopover(); } catch { /* 已被关掉 */ }
+  }
+
+  layoutToasts();
+
+  // 只播报正文，不要把按钮的名字一起念出来
+  if (typeof el.ariaNotify === 'function') {
+    try { el.ariaNotify(message); } catch { /* 忽略 */ }
+  }
+
+  if (!persistent) {
+    setTimeout(() => {
+      if (SUPPORTS_POPOVER && el.matches(':popover-open')) el.hidePopover();
+      else { el.remove(); layoutToasts(); }
+    }, level === 'err' ? 9000 : 4000);
+  }
+  return el;
 }
 
 /* ── 主题（浅色 / 深色）────────────────────────────────────
@@ -212,9 +295,15 @@ function initTheme() {
 /* ── 网络连通性自检 ────────────────────────────────────────
  *
  * 「账号密码错了」和「本机网断了」是最容易混淆的两种故障。
- * 这里做一次纯 TCP 探测（服务端发，不带任何业务请求），
+ * 服务端做一次 TLS 握手级探测（不带任何业务请求），
  * 把两者明确区分开，并直接告诉用户该检查什么。
+ *
+ * 探测每 60s 跑一次，所以只在「状态发生变化」时才播报，
+ * 避免故障持续时反复打扰（也避免读屏用户被同样的信息刷屏）。
  */
+let netState = null;      // null=未知 'ok' 'bad'
+let netToast = null;      // 持续故障期间常驻的那条通知
+
 async function checkConnectivity() {
   let data;
   try {
@@ -224,9 +313,14 @@ async function checkConnectivity() {
   }
   const bad = data.unreachable || [];
   const ok = bad.length === 0 && data.allReachable !== false;
+  const next = ok ? 'ok' : 'bad';
+  const changed = next !== netState;
+  netState = next;
 
   const badge = $('#net');
-  if (badge) {
+  // 只在真的变了的时候才改 DOM —— 每 60s 重写同样的文本会让读屏软件重复播报
+  if (badge && badge.dataset.state !== next) {
+    badge.dataset.state = next;
     badge.textContent = ok ? '网络正常' : '网络不通';
     badge.className = 'badge ' + (ok ? 'ok' : 'danger');
     badge.title = ok
@@ -245,6 +339,23 @@ async function checkConnectivity() {
         esc(bad.join('、')) +
         '<br/>这不是账号密码问题 —— 请检查本机网络 / 代理节点是否正常，恢复后再试。';
     }
+  }
+
+  // 网络故障是「持续状态」而不是「一次性事件」→ 用常驻通知，不自动消失
+  if (!ok && changed) {
+    netToast = toast(
+      '连不上平台服务：' +
+        bad.join('、') +
+        '。这不是账号密码问题，请检查本机网络 / 代理节点是否正常，恢复后再试。',
+      'err',
+      { persistent: true }
+    );
+  } else if (ok && changed && netToast) {
+    // 恢复了就把常驻通知收掉
+    if (SUPPORTS_POPOVER && netToast.matches(':popover-open')) netToast.hidePopover();
+    else netToast.remove();
+    netToast = null;
+    layoutToasts();
   }
 }
 

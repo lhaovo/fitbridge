@@ -508,6 +508,8 @@ async function runSync(dry) {
           maxItemsPerRun: Number($('#max-items').value) || 50,
           // 全量重拉：忽略增量窗口，重新拉全部历史（去重仍生效，不会产生重复）
           forceResync: force,
+          // 上传后回查目标平台列表，确认真的入库了再算成功
+          verifyUpload: !!$('#verify-upload')?.checked,
         },
       },
     });

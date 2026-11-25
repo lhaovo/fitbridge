@@ -84,6 +84,10 @@ export interface SyncTaskSpec {
     adjustTimezone: 'auto' | 'never';
     skipFailedTargets: boolean;
     forceResync: boolean;
+    /** 上传后回查目标平台，确认真的入库了（默认开） */
+    verifyUpload: boolean;
+    /** 回查等待上限（秒） */
+    verifyTimeoutSec: number;
   };
 }
 
@@ -145,6 +149,11 @@ export const DEFAULT_SYNC_POLICY: SyncTaskSpec['policy'] = {
   adjustTimezone: 'auto',
   skipFailedTargets: true,
   forceResync: false,
+  // ★ 默认开启上传回查。
+  //   有些平台（如迈金）上传接口会返回「成功」但后台其实把文件丢了，
+  //   不回查就会出现「显示上传成功、目标平台里啥也没有」的假象。
+  verifyUpload: true,
+  verifyTimeoutSec: 90,
 };
 
 export interface RunSyncOptions {
@@ -646,6 +655,9 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
     st.uploadPlanned += batch.length;
     summary.uploadPlanned += batch.length;
 
+    /** 本轮提交成功、等待回查确认入库的 */
+    const uploaded: { item: UploadCandidate; result: { remoteId?: string } }[] = [];
+
     for (const item of batch) {
       const external = externalIdFor({
         sourcePlatform: item.sourcePlatform,
@@ -705,15 +717,10 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
           );
         }
 
-        await deps.store.markSynced(
-          userId,
-          item.activityId,
-          targetId,
-          result.remoteId,
-          runId,
-        );
-        st.uploaded++;
-        summary.uploaded++;
+        // ★ 先记下来，等回查确认入库后再 markSynced。
+        //   有些平台上传接口返回成功但后台把文件丢了（迈金实测如此），
+        //   先 markSynced 会把「没传成功」记成「已同步」，后面再也不会重传。
+        uploaded.push({ item, result });
 
         await deps.events.emit(userId, {
           level: 'info',
@@ -721,7 +728,8 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
           platformId: targetId,
           activityId: item.activityId,
           runId,
-          message: '已上传到 ' + adapter.manifest.displayName + '：' + item.name,
+          message:
+            '已提交到 ' + adapter.manifest.displayName + '（待回查确认入库）：' + item.name,
         });
       } catch (err) {
         const e = normalizeError(err, targetId);
@@ -740,6 +748,68 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
         });
 
         if (!policy.skipFailedTargets) break;
+      }
+    }
+
+    // ── 回查确认入库 ─────────────────────────────────────
+    //
+    // ★ 上传接口返回「成功」不代表数据真的进了目标平台。
+    //   实测：迈金 upload/fit 返回 {"success_count":1}、HTTP 200，
+    //   但十几分钟后活动列表里依然没有这条活动（平台后台把文件丢了）。
+    //   所以这里回查目标平台的列表，逐条确认；
+    //   没出现的记为上传失败（而不是假装成功），下一轮还能重传。
+    if (uploaded.length > 0) {
+      const appeared = policy.verifyUpload
+        ? await verifyUploaded(
+            adapter,
+            targetCred,
+            uploaded.map((u) => u.item),
+            deps,
+            targetId,
+            userId,
+            transientBudget,
+            retryDelays,
+            policy.verifyTimeoutSec,
+          )
+        : new Set(uploaded.map((u) => u.item.activityId));
+
+      for (const u of uploaded) {
+        if (appeared.has(u.item.activityId)) {
+          await deps.store.markSynced(
+            userId,
+            u.item.activityId,
+            targetId,
+            u.result.remoteId,
+            runId,
+          );
+          st.uploaded++;
+          summary.uploaded++;
+          await deps.events.emit(userId, {
+            level: 'info',
+            category: 'sync',
+            platformId: targetId,
+            activityId: u.item.activityId,
+            runId,
+            message:
+              '已上传到 ' + adapter.manifest.displayName + '（已确认入库）：' + u.item.name,
+          });
+        } else {
+          st.uploadFailed++;
+          summary.uploadFailed++;
+          const msg =
+            '上传未确认入库：上传接口已受理，但等待 ' + policy.verifyTimeoutSec +
+            ' 秒后目标平台列表里仍没有这条活动 —— ' +
+            '该平台会静默丢弃这类文件（迈金实测如此），可稍后重试或换个目标平台';
+          summary.errors.push(targetId + '/' + u.item.activityId + ': ' + msg);
+          await deps.events.emit(userId, {
+            level: 'error',
+            category: 'sync',
+            platformId: targetId,
+            activityId: u.item.activityId,
+            runId,
+            message: '上传未确认入库：' + u.item.name + ' —— ' + msg,
+          });
+        }
       }
     }
   }
@@ -843,6 +913,72 @@ async function candidateFromStored(
     distanceMeters: a.distanceMeters,
     syncedTargets: a.syncedTargets ?? [],
   };
+}
+
+/**
+ * 回查目标平台，确认这批活动真的入库了。
+ *
+ * 轮询目标平台的活动列表，按「时间 + 距离」软匹配逐条确认。
+ * 返回已确认入库的活动 id 集合。
+ */
+async function verifyUploaded(
+  adapter: PlatformAdapter,
+  cred: Credential,
+  items: UploadCandidate[],
+  deps: SyncRunDeps,
+  platformId: string,
+  userId: string,
+  budget?: { left: number },
+  delaysMs?: number[],
+  timeoutSec = 90,
+): Promise<Set<string>> {
+  const appeared = new Set<string>();
+  const pending = [...items];
+  const deadline = Date.now() + timeoutSec * 1000;
+  const intervalMs = 10_000;
+
+  while (pending.length > 0) {
+    let remotes: RemoteActivity[] = [];
+    try {
+      const page = await withAuthRetry(
+        adapter,
+        cred,
+        () => adapter.listActivities(cred, { limit: TARGET_EXISTENCE_LIMIT }),
+        deps,
+        platformId,
+        userId,
+        budget,
+        delaysMs,
+      );
+      remotes = page.items;
+    } catch (err) {
+      const e = normalizeError(err, platformId);
+      // 回查失败 ≠ 上传失败：平台可能只是暂时查不到。
+      // 这里保守处理：查不到就认为还没入库，但不清空已确认的。
+      await deps.events.emit(userId, {
+        level: 'warn',
+        category: 'platform',
+        platformId,
+        message: '回查目标平台列表失败（暂无法确认入库）：' + e.message,
+        data: { code: e.code },
+      });
+      break;
+    }
+
+    for (let i = pending.length - 1; i >= 0; i--) {
+      const it = pending[i]!;
+      if (remotes.some((r) => isSameActivity(it, r))) {
+        appeared.add(it.activityId);
+        pending.splice(i, 1);
+      }
+    }
+
+    if (pending.length === 0) break;
+    if (Date.now() >= deadline) break;
+    await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+  }
+
+  return appeared;
 }
 
 /**

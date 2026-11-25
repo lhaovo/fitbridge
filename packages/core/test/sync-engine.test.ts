@@ -168,6 +168,12 @@ function manifest(id: string, upload: boolean, formats: Array<'fit' | 'gpx' | 't
   };
 }
 
+/** 各条活动的开始时间（真实场景两条活动不会同一时刻） */
+const START: Record<string, string> = {
+  r1: '2026-03-01T02:00:00.000Z',
+  r2: '2026-03-02T02:00:00.000Z',
+};
+
 function makeSource(overrides: Partial<PlatformAdapter> = {}): PlatformAdapter {
   return {
     manifest: manifest('src', false, []),
@@ -187,12 +193,12 @@ function makeSource(overrides: Partial<PlatformAdapter> = {}): PlatformAdapter {
       };
     },
     async getActivityDetail(_c: Credential, id: string) {
-      return { remoteId: id, name: 'act-' + id, startTime: '2026-03-01T02:00:00.000Z' };
+      return { remoteId: id, name: 'act-' + id, startTime: START[id] ?? START.r1 };
     },
-    async downloadFile() {
+    async downloadFile(_c: Credential, activity: { remoteId: string }) {
       return {
         content: buildSyntheticFit({
-          start: new Date('2026-03-01T02:00:00.000Z'),
+          start: new Date(START[activity.remoteId] ?? START.r1),
           recordCount: 20,
         }),
         contentType: 'application/octet-stream',
@@ -205,8 +211,15 @@ function makeSource(overrides: Partial<PlatformAdapter> = {}): PlatformAdapter {
   } as PlatformAdapter;
 }
 
-function makeTarget(uploadFormats: Array<'fit' | 'gpx' | 'tcx'>, result: { status: 'accepted' | 'pending' | 'rejected'; message?: string } = { status: 'accepted' }) {
+function makeTarget(
+  uploadFormats: Array<'fit' | 'gpx' | 'tcx'>,
+  result: { status: 'accepted' | 'pending' | 'rejected'; message?: string } = { status: 'accepted' },
+  opts: { /** 上传后目标列表是否能看到（迈金实测：接口成功但列表没有） */ appears?: boolean } = {},
+) {
   const calls: unknown[] = [];
+  /** 目标平台「已入库」的活动 */
+  const stored: { remoteId: string; startTime?: string }[] = [];
+  const appears = opts.appears ?? true;
   const adapter: PlatformAdapter = {
     manifest: manifest('dst', true, uploadFormats),
     async auth() {
@@ -216,17 +229,20 @@ function makeTarget(uploadFormats: Array<'fit' | 'gpx' | 'tcx'>, result: { statu
       return { ok: true, checkedAt: new Date().toISOString() };
     },
     async listActivities() {
-      return { items: [], hasMore: false };
+      return { items: [...stored], hasMore: false };
     },
     async downloadFile() {
       throw new Error('not used');
     },
     async uploadFile(_c, file, hint) {
       calls.push({ file, hint });
+      if (appears && result.status !== 'rejected') {
+        stored.push({ remoteId: 'remote-' + stored.length, startTime: hint.startTime });
+      }
       return { status: result.status, remoteId: 'remote-1', message: result.message };
     },
   };
-  return { adapter, calls };
+  return { adapter, calls, stored };
 }
 
 /* ── 测试 ──────────────────────────────────────────────── */
@@ -392,12 +408,16 @@ describe('同步引擎', () => {
     } as Partial<PlatformAdapter>);
 
     // 目标：已经有 r1 那条（时间相同、距离相同）
-    const { adapter: dst, calls } = makeTarget(['fit']);
+    const { adapter: dst, calls, stored } = makeTarget(['fit']);
     const dstWithList: PlatformAdapter = {
       ...dst,
       async listActivities() {
         return {
-          items: [{ remoteId: 'already-1', name: 'A', startTime: '2026-03-01T02:00:00.000Z', distanceMeters: 100 }],
+          items: [
+            { remoteId: 'already-1', name: 'A', startTime: '2026-03-01T02:00:00.000Z', distanceMeters: 100 },
+            // 已上传的（回查要能看到）
+            ...stored.map((s) => ({ ...s, distanceMeters: 100 })),
+          ],
           hasMore: false,
         };
       },
@@ -498,6 +518,53 @@ describe('同步引擎', () => {
     // 缺时间 → 宁可判为「不是」（避免漏传）
     expect(isSameActivity(base, { distanceMeters: 1000 })).toBe(false);
     expect(isSameActivity({ distanceMeters: 1000 }, base)).toBe(false);
+  });
+
+  it('上传后回查：目标平台列表里没出现 → 记为上传失败（不假装成功）', async () => {
+    const src = makeSource();
+    // 模拟迈金：接口返回成功，但后台把文件丢了 → 列表里永远没有
+    const { adapter: dst, calls } = makeTarget(['fit'], { status: 'accepted' }, { appears: false });
+    const r = await runSync({
+      task: { sourcePlatforms: ['src'], targetPlatforms: ['dst'], filters: {}, policy: { ...DEFAULT_SYNC_POLICY, verifyTimeoutSec: 1 } },
+      userId: 'default',
+      deps: deps([src, dst]),
+    });
+
+    expect(calls.length).toBe(2);       // 确实提交上去了
+    expect(r.uploaded).toBe(0);         // 但没确认入库 → 不算成功
+    expect(r.uploadFailed).toBe(2);
+    expect(r.errors.join(' ')).toContain('未确认入库');
+    // 没确认入库 → 不能标记为已同步，下一轮还能重传
+    for (const a of store.activities.values()) {
+      expect(a.syncedTargets).not.toContain('dst');
+    }
+  });
+
+  it('上传后回查：目标平台能看到 → 记为成功并标记已同步', async () => {
+    const src = makeSource();
+    const { adapter: dst } = makeTarget(['fit']);
+    const r = await runSync({
+      task: { sourcePlatforms: ['src'], targetPlatforms: ['dst'], filters: {}, policy: DEFAULT_SYNC_POLICY },
+      userId: 'default',
+      deps: deps([src, dst]),
+    });
+    expect(r.uploaded).toBe(2);
+    expect(r.uploadFailed).toBe(0);
+    for (const a of store.activities.values()) {
+      expect(a.syncedTargets).toContain('dst');
+    }
+  });
+
+  it('verifyUpload=false → 跳过回查，直接按提交成功计', async () => {
+    const src = makeSource();
+    const { adapter: dst } = makeTarget(['fit'], { status: 'accepted' }, { appears: false });
+    const r = await runSync({
+      task: { sourcePlatforms: ['src'], targetPlatforms: ['dst'], filters: {}, policy: { ...DEFAULT_SYNC_POLICY, verifyUpload: false } },
+      userId: 'default',
+      deps: deps([src, dst]),
+    });
+    expect(r.uploaded).toBe(2);
+    expect(r.uploadFailed).toBe(0);
   });
 
   it('目标只接受 FIT 而源是 GPX → 明确报错（需 M1 转换）', async () => {

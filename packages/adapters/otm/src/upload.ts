@@ -3,6 +3,7 @@ import type {
   UploadHint,
   UploadResult,
 } from '@fitbridge/core';
+import { needsRebuild, readFit, rebuildFit } from '@fitbridge/fitkit';
 import { OtmClient } from './client.js';
 
 /**
@@ -28,8 +29,37 @@ export async function uploadFile(
   }
 
   const token = String(cred.secret.token ?? '');
+
+  // ★ 上传前先把 FIT 规范化。
+  //   迈金的异步入库对文件结构有要求：
+  //   整个活动只有 1 个 lap、或 sub_sport=virtual_activity 的文件会被静默丢弃
+  //   （接口照样返回 success_count=1，但列表里永远不出现）。
+  //   重建后是「每 5km 一个 lap + device_info + sport 消息 + generic sub_sport」，
+  //   和迈金自己的设备导出结构一致。
+  let content = file.content;
+  let filename = file.filename;
+  if (file.kind === 'fit') {
+    try {
+      const summary = await readFit(file.content, { maxTrackPoints: 0 });
+      if (needsRebuild(summary)) {
+        const rebuilt = rebuildFit({
+          summary,
+          manufacturer: 255,
+          product: 1,
+          serialNumber: 1,
+          productName: 'FitBridge',
+          timezoneOffsetMin: summary.timezoneOffsetMin,
+        });
+        content = rebuilt.content;
+        filename = filename.replace(/\.fit$/i, '') + '-norm.fit';
+      }
+    } catch {
+      // 解析失败就按原样传，让平台自己报错（不要因为重建失败而挡住上传）
+    }
+  }
+
   const form = new FormData();
-  form.append('jilu0', new Blob([file.content]), file.filename);
+  form.append('jilu0', new Blob([content]), filename);
 
   const res = await client.request<{ success_count?: number }>(
     '/api/otm/ride_record/upload/fit',

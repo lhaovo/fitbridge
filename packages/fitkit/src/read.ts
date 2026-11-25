@@ -422,16 +422,26 @@ function aggregateFromRecords(
 function buildRaw(
   session: Record<string, unknown> | undefined,
   lap: Record<string, unknown> | undefined,
-  parsed: { file_creator?: unknown; device_settings?: unknown },
+  parsed: {
+    file_creator?: unknown;
+    device_settings?: unknown;
+    laps?: unknown[];
+  },
 ): Record<string, unknown> {
   const raw: Record<string, unknown> = {};
   if (session) {
     raw.session_event = session.event;
     raw.session_trigger = session.trigger;
+    // sub_sport 很关键：virtual_activity（虚拟活动）会被迈金这类严格平台
+    // 当成虚拟记录丢掉 —— rebuild 时要换成 generic。
+    raw.sub_sport = session.sub_sport;
+    raw.sport = session.sport;
   }
   if (lap) {
     raw.lap_trigger = lap.trigger;
   }
+  // lap 数量：只有一个 lap 意味着整个活动被当成一段，严格平台可能不认
+  raw.lap_count = parsed.laps?.length ?? 0;
   if (parsed.file_creator) raw.file_creator = parsed.file_creator;
   if (parsed.device_settings) raw.device_settings = parsed.device_settings;
   return raw;

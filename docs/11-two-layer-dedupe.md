@@ -80,12 +80,71 @@ Discover(源平台) ──► [下载层去重: 本地库有没有?] ──┬�
 跳过的 6 条就是「迈金已经有了」的那几条 —— 说明软判重真的在工作，
 而不是把「本地已有」和「目标已有」混为一谈。
 
-### 遗留：迈金侧入库延迟
-上传接口返回 `success_count >= 1`（已受理），但几分钟后迈金活动列表仍是 33 条，
-新传的那 2 条没出现。迈金是异步入库（官方 JS 提示 15-20 秒），
-这属于平台侧行为，与去重逻辑无关。待平台入库后再复查一次即可。
+### 遗留：迈金侧入库（已定位到平台侧，且已加「回查确认」兜底）
+
+上传接口返回 `{"code":200,"success_count":1,"failed_files":[]}`（已受理），
+但迈金活动列表 `pagination.total` 始终是 33，新传的那 2 条不出现。
+
+排查过程（都是实测）：
+
+| 实验 | 文件 | 结果 |
+|---|---|---|
+| ① 原样上传 MyWhoosh 的 FIT | `be1f4ed5`（1 个 lap、`sub_sport=virtual_activity`） | 接口 200 / success_count=1，**列表无** |
+| ② 重建后上传（5km 一个 lap + device_info + sport 消息 + generic sub_sport） | 同一条活动 | 接口 200 / success_count=1，**列表无** |
+| ③ 上传 fitkit 生成的**合成 FIT**（最标准的 file_id→session→lap→activity→record，CRC 正确） | `/tmp/synth.fit` | 接口 200 / success_count=1，**列表无** |
+| ④ 换字段名 `jilu`（网页端那个） | 同上 | **422「没有上传文件」**（与参考项目记载一致） |
+| ⑤ 用上传返回的 `file_key` 反查 `analysis/fit_content/{base64(key)}` | 两次上传的 key | **HTTP 500** → 迈金侧根本没生成骑行记录 |
+
+结论：**不是文件格式问题**。③说明连最标准的 FIT 都不入库，⑤说明迈金后台根本没建记录。
+参考项目（成熟 Android 应用）也把 MyWhoosh 列为「仅作下载数据源」，
+并在 README 里记录了同类现象：「上传成功但列表无数据」。
+
+### 应对：上传后回查确认入库（已实现）
+
+既然平台会「假成功」，就不能信接口的返回值：
+
+```
+上传成功（接口层）
+   ↓
+回查目标平台列表（轮询到 verifyTimeoutSec，默认 90s）
+   ├─ 出现了  → markSynced，算「上传成功」
+   └─ 没出现  → 记为「上传失败：未确认入库」，不写 sync_items
+                 → 下一轮还能重传
+```
+
+实测（MyWhoosh → 迈金，verifyTimeoutSec=40）：
+
+```
+下载 0 · 跳过下载 1 · 上传 0 · 跳过上传 6 · 上传失败 2
+  ! otm/5ecd8712…: 上传未确认入库：上传接口已受理，但等待 40 秒后目标平台列表里
+     仍没有这条活动 —— 该平台会静默丢弃这类文件（迈金实测如此），可稍后重试或换个目标平台
+```
+
+DB 里这两条**没有**被标成已同步（`sync_items` 为空）→ 下一轮会重传 ✓
+关掉开关（`verifyUpload: false`）则退回「接口返回即算成功」的旧行为。
+
+### FIT 重建器（顺带做了）
+
+`packages/fitkit/src/rebuild.ts` —— 把任意来源的 FIT 改写成标准结构：
+
+- 每个 lap 切 5km（与迈金原生文件一致），并写全 lap 汇总字段
+- `sub_sport` 用 252（generic），不用 `virtual_activity`
+- 补 `sport`(12)、`device_info`(23) 消息
+- session 的 `avg_speed` 按「距离/移动时间」自算（源文件里这个字段经常是坏的）
+
+往返无损验证：距离 34235.1m、心率 149、功率 105、开始时间全部一致，
+CRC 校验通过。迈金上传前会自动判断「需不需要重建」再传。
 
 ---
+
+## 3.1 相关代码
+
+| 文件 | 内容 |
+|---|---|
+| `packages/fitkit/src/rebuild.ts` | FIT 重建器（5km lap / device_info / sport / generic sub_sport） |
+| `packages/fitkit/src/read.ts` | `raw` 里补 `lap_count` / `sub_sport`，供 `needsRebuild()` 判断 |
+| `packages/adapters/otm/src/upload.ts` | 迈金上传前自动重建不合规的 FIT |
+| `packages/core/src/engine/sync-engine.ts` | `verifyUploaded()` 回查 + `uploaded` 暂存后再 markSynced |
 
 ## 4. 状态字段
 
@@ -97,6 +156,8 @@ Discover(源平台) ──► [下载层去重: 本地库有没有?] ──┬�
 | `uploadSkipped` | 上传阶段跳过（目标已有 / 已同步过） |
 | `uploadPlanned` | 本轮计划上传（dryRun 时 = 预览条数） |
 | `uploadDeferred` | 因条数上限本轮没轮到，下轮继续 |
+| `verifyUpload`（policy） | 上传后是否回查确认入库，默认 true |
+| `verifyTimeoutSec`（policy） | 回查等待上限，默认 90 秒 |
 
 前端把两层拆开展示：「跳过下载（本地已有）」 vs 「跳过上传（目标已有）」。
 
@@ -107,6 +168,6 @@ Discover(源平台) ──► [下载层去重: 本地库有没有?] ──┬�
 | 文件 | 内容 |
 |---|---|
 | `packages/core/src/engine/sync-engine.ts` | `UploadCandidate`、`candidateFromStored()`、`isSameActivity()`、上传阶段判重、上限后置 |
-| `packages/core/test/sync-engine.test.ts` | 8 个新用例（本地已有仍上传 / 已同步跳过 / 目标已有跳过 / forceResync / dryRun 预览 / 上限收敛 / isSameActivity 单测） |
+| `packages/core/test/sync-engine.test.ts` | 11 个新用例（本地已有仍上传 / 已同步跳过 / 目标已有跳过 / forceResync / dryRun 预览 / 上限收敛 / 回查失败不假装成功 / 回查成功才标已同步 / 关掉回查 / isSameActivity 单测） |
 | `apps/server/public/app.js` | 结果展示拆成「跳过下载 / 跳过上传 / 未轮到」 |
 | `apps/server/public/index.html` | 面板说明改成「去重分两层，互不影响」 |

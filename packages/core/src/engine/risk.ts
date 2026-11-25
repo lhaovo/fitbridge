@@ -23,6 +23,15 @@ export type AuthFailureKind =
   | 'invalid-credential'
   /** 只是含 "invalid/password" 等模糊词，无法判定 */
   | 'ambiguous'
+  /**
+   * 网络 / 上游不可达（连接重置、超时、DNS 失败…）。
+   *
+   * ★ 单独分一类的原因：这**不是账号的问题**。
+   *   早先它会落到 'unknown'，然后登录接口返回 401 AUTH_EXPIRED，
+   *   用户会以为密码错了 —— 实际上只是本机网络/代理断了。
+   *   更糟的是：如果网络故障发生在登录流程里，绝不能因此给账号记风控冷却。
+   */
+  | 'network'
   /** 其他 */
   | 'unknown';
 
@@ -112,7 +121,22 @@ export function classifyAuthFailure(
 
   const hit = (list: string[]) => list.some((k) => text.includes(k));
 
-  // 明确的 401：凭证失效（而不是密码错）
+  // ① 网络 / 上游不可达 —— 优先级最高，且**不是账号的问题**
+  if (isNetworkFailure(raw)) {
+    return {
+      kind: 'network',
+      // 绝不因为网络故障给账号记风控冷却
+      shouldCooldown: false,
+      cooldownMinutes: 0,
+      message:
+        '网络或上游服务不可达（不是账号密码问题）：' +
+        raw +
+        '。请先检查本机网络 / 代理是否正常，恢复后再试。',
+      raw,
+    };
+  }
+
+  // ② 明确的 401：凭证失效（而不是密码错）
   const looksUnauthorized =
     opts.status === 401 ||
     /\b401\b/.test(text) ||
@@ -186,27 +210,42 @@ export function classifyAuthFailure(
   };
 }
 
+/**
+ * 是否属于「网络层失败」。
+ *
+ * 与账号、凭证、风控都无关，纯粹是「这台机器连不上对方」。
+ * 单独拎出来是为了：① 不误判成密码错 ② 不给账号记风控冷却。
+ */
+export function isNetworkFailure(raw: string): boolean {
+  const t = (raw ?? '').toLowerCase();
+  return (
+    t.includes('econnreset') ||
+    t.includes('econnrefused') ||
+    t.includes('etimedout') ||
+    t.includes('enotfound') ||
+    t.includes('eai_again') ||
+    t.includes('epipe') ||
+    t.includes('ehostunreach') ||
+    t.includes('enetunreach') ||
+    t.includes('socket hang up') ||
+    t.includes('fetch failed') ||
+    t.includes('network') ||
+    t.includes('连接超时') ||
+    t.includes('连接被拒绝') ||
+    t.includes('连接被重置') ||
+    t.includes('域名解析失败') ||
+    t.includes('tls') ||
+    t.includes('握手') ||
+    t.includes('network socket disconnected')
+  );
+}
+
 /** 是否属于「可以自动重试」的技术性失败（网络/5xx） */
 export function isTransientFailure(raw: string, status?: number): boolean {
   if (status !== undefined) {
     return status >= 500 || status === 408 || status === 429;
   }
-  const t = raw.toLowerCase();
-  return (
-    t.includes('econnreset') ||
-    t.includes('etimedout') ||
-    t.includes('econnrefused') ||
-    t.includes('socket hang up') ||
-    t.includes('network') ||
-    t.includes('enotfound') ||
-    t.includes('eai_again') ||
-    t.includes('fetch failed') ||
-    t.includes('连接超时') ||
-    t.includes('连接被拒绝') ||
-    t.includes('连接被重置') ||
-    t.includes('域名解析失败') ||
-    t.includes('tls 证书')
-  );
+  return isNetworkFailure(raw);
 }
 
 /** 网络层错误码（undici / Node）→ 是否值得重试 */

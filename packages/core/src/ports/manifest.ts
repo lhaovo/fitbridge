@@ -43,6 +43,11 @@ export interface PlatformManifest {
   shortCode: string;
   vendor: string;
   homepage?: string;
+  /**
+   * 平台 API 所在域名（用于网络连通性自检）。
+   * 只做 TCP 探测，不带任何业务请求。
+   */
+  apiHost?: string;
 
   authType: AuthType;
   access: PlatformAccess;

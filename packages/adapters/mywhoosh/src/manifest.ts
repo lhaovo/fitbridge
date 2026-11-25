@@ -6,6 +6,8 @@ export const mywhooshManifest: PlatformManifest = {
   shortCode: 'mw',
   vendor: 'MyWhoosh',
   homepage: 'https://www.mywhoosh.com',
+  // 登录走 services.*，业务接口走 service14.*，两个都要探
+  apiHost: 'services.mywhoosh.com',
 
   authType: 'password',
   access: 'reverse-engineered',

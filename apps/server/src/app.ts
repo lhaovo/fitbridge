@@ -8,6 +8,7 @@ import { Database } from './lib/db.js';
 import { CredentialRepository } from './lib/credential-repository.js';
 import { RiskGuard } from './lib/risk-guard.js';
 import { listEvents } from './lib/repositories.js';
+import { probeHosts } from './lib/connectivity.js';
 import type { FileStore } from '@fitbridge/core';
 import { listManifests, getAdapter, listAdapters } from './lib/platforms.js';
 import {
@@ -147,7 +148,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     // 平台能力矩阵与认证接口是公开的
     if (
       req.url.startsWith('/api/v1/platforms') ||
-      req.url.startsWith('/api/v1/auth/')
+      req.url.startsWith('/api/v1/auth/') ||
+      // 网络自检：登录前就要能看到「网断了」，所以公开
+      req.url.startsWith('/api/v1/connectivity')
     ) {
       return;
     }
@@ -175,6 +178,46 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   app.get('/api/v1/platforms', async () => ({
     platforms: listManifests(),
   }));
+
+  /**
+   * 网络连通性自检（公开）。
+   *
+   * 纯 TCP 探测：只建连、握手、断开，不发任何业务请求 ——
+   * 不会触发平台风控，也不会消耗配额。
+   *
+   * 用途：把「网断了」和「账号密码错了」这两件事明确区分开。
+   * 这是这类自托管工具最高频的误判来源。
+   */
+  app.get('/api/v1/connectivity', async () => {
+    const manifests = listManifests();
+    const hosts = [
+      ...new Set(
+        manifests.map((m) => m.apiHost).filter((h): h is string => Boolean(h)),
+      ),
+    ];
+    const probes = await probeHosts(hosts);
+    const byHost = new Map(probes.map((p) => [p.host, p]));
+    return {
+      checkedAt: new Date().toISOString(),
+      probes,
+      platforms: manifests.map((m) => {
+        const probe = m.apiHost ? byHost.get(m.apiHost) : undefined;
+        return {
+          platformId: m.id,
+          displayName: m.displayName,
+          host: m.apiHost ?? null,
+          reachable: probe ? probe.reachable : null,
+          error: probe?.error,
+          stage: probe?.stage,
+          ip: probe?.ip,
+          fakeIp: probe?.fakeIp,
+          ms: probe?.ms,
+        };
+      }),
+      allReachable: probes.length > 0 && probes.every((p) => p.reachable),
+      unreachable: probes.filter((p) => !p.reachable).map((p) => p.host),
+    };
+  });
 
   app.get('/api/v1/platforms/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -307,19 +350,25 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       const raw = err instanceof Error ? err.message : String(err);
       const failure = classifyAuthFailure(raw);
 
-      // ② 失败分类：区分「密码错」与「风控」
+      // ② 失败分类：区分「密码错」「风控」「网络不通」
       //    ★ 绝不自动重试 —— 参考项目原文：输错一次即可能触发风控
+      //    ★ 网络故障也不能给账号记风控冷却（不是账号的锅）
       deps.riskGuard.recordFailure(platformId, account, failure);
 
-      const status = failure.shouldCooldown ? 429 : 401;
+      // 网络不通 ≠ 凭证有问题。
+      // 早先一律返回 401 AUTH_EXPIRED，用户会以为密码错了，其实只是网断了。
+      const isNet = failure.kind === 'network';
+      const status = failure.shouldCooldown ? 429 : isNet ? 503 : 401;
       return reply.code(status).send({
         error: {
-          code: failure.shouldCooldown ? 'RATE_LIMITED' : 'AUTH_EXPIRED',
+          code: failure.shouldCooldown
+            ? 'RATE_LIMITED'
+            : isNet
+              ? 'UPSTREAM_UNREACHABLE'
+              : 'AUTH_EXPIRED',
           message:
             failure.message +
-            '（原始错误：' +
-            raw.slice(0, 160) +
-            '）',
+            (isNet ? '' : '（原始错误：' + raw.slice(0, 160) + '）'),
         },
         kind: failure.kind,
         retryAfterMinutes: failure.cooldownMinutes || undefined,
@@ -408,14 +457,20 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       deps.credentialRepo.setStatus(id, 'active');
       return { ok: true };
     } catch (err) {
-      deps.credentialRepo.setStatus(id, 'error', 'AUTH_EXPIRED');
-      return reply.code(401).send({
+      const raw = err instanceof Error ? err.message : String(err);
+      const failure = classifyAuthFailure(raw);
+      const isNet = failure.kind === 'network';
+      // 网络故障时不要把凭证标成「凭证失效」—— 凭证本身可能完全没问题，
+      // 标错了会让用户以为要去改密码。
+      deps.credentialRepo.setStatus(id, 'error', isNet ? 'NETWORK' : 'AUTH_EXPIRED');
+      return reply.code(isNet ? 503 : 401).send({
         error: {
-          code: 'AUTH_EXPIRED',
-          message:
-            '重新登录失败: ' +
-            (err instanceof Error ? err.message : String(err)).slice(0, 200),
+          code: isNet ? 'UPSTREAM_UNREACHABLE' : 'AUTH_EXPIRED',
+          message: isNet
+            ? '重新登录失败（网络不可达，凭证本身可能没问题）：' + raw.slice(0, 200)
+            : '重新登录失败: ' + raw.slice(0, 200),
         },
+        kind: failure.kind,
       });
     }
   });

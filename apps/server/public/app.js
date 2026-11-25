@@ -209,6 +209,45 @@ function initTheme() {
   });
 }
 
+/* ── 网络连通性自检 ────────────────────────────────────────
+ *
+ * 「账号密码错了」和「本机网断了」是最容易混淆的两种故障。
+ * 这里做一次纯 TCP 探测（服务端发，不带任何业务请求），
+ * 把两者明确区分开，并直接告诉用户该检查什么。
+ */
+async function checkConnectivity() {
+  let data;
+  try {
+    data = await api('/connectivity');
+  } catch {
+    return;
+  }
+  const bad = data.unreachable || [];
+  const ok = bad.length === 0 && data.allReachable !== false;
+
+  const badge = $('#net');
+  if (badge) {
+    badge.textContent = ok ? '网络正常' : '网络不通';
+    badge.className = 'badge ' + (ok ? 'ok' : 'danger');
+    badge.title = ok
+      ? '所有平台 API 域名均可连接'
+      : '连不上：' + bad.join('、') + '（检查本机网络 / 代理节点）';
+  }
+
+  const note = $('#net-note');
+  if (note) {
+    if (ok) {
+      note.hidden = true;
+    } else {
+      note.hidden = false;
+      note.innerHTML =
+        '<b>连不上平台服务</b>：' +
+        esc(bad.join('、')) +
+        '<br/>这不是账号密码问题 —— 请检查本机网络 / 代理节点是否正常，恢复后再试。';
+    }
+  }
+}
+
 /* ── 登录 ───────────────────────────────────────────────── */
 function renderLogin(msg) {
   const root = $('#app');
@@ -232,6 +271,7 @@ function renderLogin(msg) {
 
   $('#pwd').focus();
   if (msg) err.textContent = msg;
+  checkConnectivity();
 }
 
 /* ── 主框架 ─────────────────────────────────────────────── */
@@ -271,6 +311,7 @@ function startPolling() {
   stopPolling();
   pollTimers.push(setInterval(loadEvents, 8000));
   pollTimers.push(setInterval(loadStorage, 30000));
+  pollTimers.push(setInterval(checkConnectivity, 60000));
 }
 function stopPolling() {
   pollTimers.forEach((t) => clearInterval(t));
@@ -282,6 +323,7 @@ document.addEventListener('visibilitychange', () => {
   } else {
     loadEvents();
     loadStorage();
+    checkConnectivity();
     startPolling();
   }
 });
@@ -360,6 +402,14 @@ async function runSync(dry) {
     });
     const s = data.summary;
     const dupSkipped = s.skipped > 0;
+
+    // 所有平台都因为网络失败 → 大概率是本机网络/代理问题，不是账号问题
+    const errs = s.errors || [];
+    const netDown =
+      errs.length > 0 &&
+      errs.length === Object.keys(s.perPlatform).length &&
+      errs.every((e) => /连接被重置|连接超时|域名解析失败|ECONNRESET|ETIMEDOUT|fetch failed|网络|不可达/.test(e));
+
     out.innerHTML = `
       <div class="tags">
         <span class="tag ${dry ? 'warn' : 'yes'}">${dry ? '预览完成（未写入任何数据）' : '同步完成'}</span>
@@ -375,6 +425,8 @@ async function runSync(dry) {
         <td>${esc(k)}${v.error ? ' <span class="tag warn">' + esc(v.error) + '</span>' : ''}</td>
         <td>${v.discovered}</td><td>${v.downloaded}</td><td>${v.skipped}</td><td>${v.failed}</td><td>${v.uploaded}</td><td>${v.uploadFailed}</td></tr>`).join('')}</tbody></table>
       ${s.errors.length ? '<div class="err" style="margin-top:10px">' + s.errors.map(esc).join('<br/>') + '</div>' : ''}
+      ${netDown ? '<div class="notice" style="margin-top:10px"><b>所有平台都连不上</b> —— 这不是账号密码问题，' +
+        '多半是本机网络 / 代理节点断了。恢复网络后再点一次同步即可，账号密码不用动。</div>' : ''}
       <div class="muted" style="margin-top:8px">runId: ${esc(s.runId)}</div>`;
     if (!dry) { loadActivities(); loadEvents(); loadStorage(); }
   } catch (e) {
@@ -741,6 +793,7 @@ async function boot() {
   }
   renderApp();
   await loadConnections();
+  checkConnectivity();
 }
 
 boot();

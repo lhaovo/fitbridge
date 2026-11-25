@@ -6,6 +6,7 @@ export const otmManifest: PlatformManifest = {
   shortCode: 'mg',
   vendor: '顽鹿运动',
   homepage: 'https://otm.onelap.cn',
+  apiHost: 'otm.onelap.cn',
 
   authType: 'password',
   access: 'reverse-engineered',

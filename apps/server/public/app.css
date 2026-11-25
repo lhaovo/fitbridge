@@ -303,6 +303,13 @@ code {
   border: 1px solid var(--border);
 }
 
+/* 网络自检提示 */
+.net-note {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--text);
+}
+
 /* ── 同步面板 ───────────────────────────────────────── */
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip {

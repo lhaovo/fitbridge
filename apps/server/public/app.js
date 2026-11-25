@@ -513,6 +513,7 @@ async function runSync(dry) {
     });
     const s = data.summary;
     const dupSkipped = s.skipped > 0;
+    const uploadDup = s.uploadSkipped > 0;
 
     // 所有平台都因为网络失败 → 大概率是本机网络/代理问题，不是账号问题
     const errs = s.errors || [];
@@ -526,15 +527,18 @@ async function runSync(dry) {
         <span class="tag ${dry ? 'warn' : 'yes'}">${dry ? '预览完成（未写入任何数据）' : '同步完成'}</span>
         <span class="tag">发现 ${s.discovered}</span>
         <span class="tag">新增 ${s.downloaded}</span>
-        <span class="tag ${dupSkipped ? 'warn' : ''}">跳过 ${s.skipped}${dupSkipped ? '（已存在·去重命中）' : ''}</span>
+        <span class="tag ${dupSkipped ? 'warn' : ''}">跳过下载 ${s.skipped}${dupSkipped ? '（本地已有）' : ''}</span>
         <span class="tag ${s.failed ? 'no' : ''}">失败 ${s.failed}</span>
+        ${dry ? `<span class="tag warn">计划上传 ${s.uploadPlanned || 0}</span>` : ''}
         <span class="tag ${s.uploaded ? 'yes' : ''}">上传 ${s.uploaded}</span>
+        <span class="tag ${uploadDup ? 'warn' : ''}">跳过上传 ${s.uploadSkipped || 0}${uploadDup ? '（目标已有）' : ''}</span>
+        ${s.uploadDeferred ? `<span class="tag warn">本轮未轮到 ${s.uploadDeferred}（受条数上限限制，下次继续）</span>` : ''}
         <span class="tag ${s.uploadFailed ? 'no' : ''}">上传失败 ${s.uploadFailed}</span>
       </div>
-      <table><thead><tr><th scope="col">平台</th><th scope="col">发现</th><th scope="col">新增</th><th scope="col">跳过(去重)</th><th scope="col">失败</th><th scope="col">上传</th><th scope="col">上传失败</th></tr></thead>
+      <table><thead><tr><th scope="col">平台</th><th scope="col">发现</th><th scope="col">新增</th><th scope="col">跳过下载</th><th scope="col">失败</th><th scope="col">上传</th><th scope="col">跳过上传</th><th scope="col">未轮到</th><th scope="col">上传失败</th></tr></thead>
       <tbody>${Object.entries(s.perPlatform).map(([k, v]) => `<tr>
         <td>${esc(k)}${v.error ? ' <span class="tag warn">' + esc(v.error) + '</span>' : ''}</td>
-        <td>${v.discovered}</td><td>${v.downloaded}</td><td>${v.skipped}</td><td>${v.failed}</td><td>${v.uploaded}</td><td>${v.uploadFailed}</td></tr>`).join('')}</tbody></table>
+        <td>${v.discovered}</td><td>${v.downloaded}</td><td>${v.skipped}</td><td>${v.failed}</td><td>${v.uploaded}</td><td>${v.uploadSkipped || 0}</td><td>${v.uploadDeferred || 0}</td><td>${v.uploadFailed}</td></tr>`).join('')}</tbody></table>
       ${s.errors.length ? '<div class="err" style="margin-top:10px">' + s.errors.map(esc).join('<br/>') + '</div>' : ''}
       ${netDown ? '<div class="notice" style="margin-top:10px"><b>所有平台都连不上</b> —— 这不是账号密码问题，' +
         '多半是本机网络 / 代理节点断了。恢复网络后再点一次同步即可，账号密码不用动。</div>' : ''}

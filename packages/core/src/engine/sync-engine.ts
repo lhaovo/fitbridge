@@ -1,6 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import type { Credential, PlatformAdapter } from '../ports/adapter.js';
-import type { ActivityStore, EventSink, SyncItemInput } from '../ports/repository.js';
+import type {
+  Credential,
+  PlatformAdapter,
+  RemoteActivity,
+} from '../ports/adapter.js';
+import type {
+  ActivityStore,
+  EventSink,
+  StoredActivity,
+  SyncItemInput,
+} from '../ports/repository.js';
 import type { FileStore } from '../ports/file-store.js';
 import { PlatformError, normalizeError } from './errors.js';
 import { relogin } from '../domain/credential.js';
@@ -25,6 +34,31 @@ import { detail as detailOf, normalize } from './pipeline.js';
  *
  * 引擎不认识任何具体平台 —— 全部差异都在 PlatformAdapter 内。
  */
+
+/**
+ * 上传候选（本地库 → 目标平台）。
+ *
+ * ★ 与「下载去重」是两回事：
+ *   下载阶段判的是「本地库有没有这条来源活动」（幂等键 user+platform+activityId）
+ *   上传阶段判的是「目标平台有没有这条活动」
+ * 两者依据不同，必须分开，否则「本地已有」会把上传整个卡死。
+ */
+interface UploadCandidate {
+  /** 本地库活动 id */
+  activityId: string;
+  sourcePlatform: string;
+  /** 来源平台上的活动 id（用于生成 external_id 幂等键） */
+  sourceActivityId: string;
+  kind: 'fit' | 'gpx' | 'tcx';
+  blobKey: string;
+  name: string;
+  startTime?: string;
+  sportType: string;
+  timezoneOffsetMin?: number;
+  distanceMeters: number;
+  /** 本地记录：这条活动已经同步到过哪些目标平台 */
+  syncedTargets: string[];
+}
 
 /** 风控闸门结果（由 server 层提供） */
 export interface GateResult {
@@ -70,9 +104,16 @@ export interface SyncRunDeps {
 export interface PlatformStat {
   discovered: number;
   downloaded: number;
+  /** 下载阶段被跳过（本地库已有该来源活动） */
   skipped: number;
   failed: number;
   uploaded: number;
+  /** 上传阶段被跳过（目标平台已经有这条活动） */
+  uploadSkipped: number;
+  /** 计划上传（dryRun 时 = 预览出来的条数） */
+  uploadPlanned: number;
+  /** 因条数上限本轮没轮到（下一轮继续） */
+  uploadDeferred: number;
   uploadFailed: number;
   error?: string;
 }
@@ -81,9 +122,16 @@ export interface SyncRunSummary {
   runId: string;
   discovered: number;
   downloaded: number;
+  /** 下载阶段跳过 */
   skipped: number;
   failed: number;
   uploaded: number;
+  /** 上传阶段跳过 */
+  uploadSkipped: number;
+  /** 计划上传（dryRun 时 = 预览条数） */
+  uploadPlanned: number;
+  /** 因条数上限本轮没轮到（下一轮继续） */
+  uploadDeferred: number;
   uploadFailed: number;
   perPlatform: Record<string, PlatformStat>;
   errors: string[];
@@ -129,6 +177,9 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
     skipped: 0,
     failed: 0,
     uploaded: 0,
+    uploadSkipped: 0,
+    uploadPlanned: 0,
+    uploadDeferred: 0,
     uploadFailed: 0,
     perPlatform: {},
     errors: [],
@@ -148,8 +199,16 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
   const transientBudget = { left: TRANSIENT_RETRY_BUDGET };
   const retryDelays = deps.retryDelaysMs ?? TRANSIENT_RETRY_DELAYS_MS;
 
-  /** 本次处理过的活动（用于上传阶段） */
-  const processed: { activityId: string; sourcePlatform: string; kind: 'fit' | 'gpx' | 'tcx'; blobKey: string; name: string; startTime?: string; sportType: string; timezoneOffsetMin?: number }[] = [];
+  /**
+   * 上传候选集。
+   *
+   * 包含两部分：
+   *   ① 本轮新下载的活动
+   *   ② 本地库已有、但本轮没有重新下载的活动（★ 上传的关键）
+   */
+  const candidates: UploadCandidate[] = [];
+  /** 已经进候选集的活动 id，避免重复 */
+  const candidateIds = new Set<string>();
 
   for (const platformId of task.sourcePlatforms) {
     const stat: PlatformStat = {
@@ -158,6 +217,9 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
       skipped: 0,
       failed: 0,
       uploaded: 0,
+      uploadSkipped: 0,
+      uploadPlanned: 0,
+      uploadDeferred: 0,
       uploadFailed: 0,
     };
     summary.perPlatform[platformId] = stat;
@@ -272,12 +334,26 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
         shortCode: adapter.manifest.shortCode,
       };
 
-      // 去重（幂等键）
+      // 去重（幂等键）—— **只针对下载这一段**
+      //
+      // ★ 本地库已有 ≠ 不该上传。
+      //   「下载」是 源平台 → 本地库，幂等键是 user+platform+activityId；
+      //   「上传」是 本地库 → 目标平台，判重依据是**目标平台有没有这条活动**。
+      //   早先把两者混在一起：本地已有 → 直接 skip → 上传阶段永远收不到这条，
+      //   于是「同时上传到目标平台」在本地库有数据时一条也传不出去。
+      //   现在：跳过下载，但把它收进上传候选集，交给上传阶段按目标侧判重。
       if (!policy.forceResync) {
         const existing = await deps.store.getBySource(userId, source);
         if (existing) {
           stat.skipped++;
           summary.skipped++;
+          if (task.targetPlatforms.length > 0) {
+            const c = await candidateFromStored(deps.store, existing);
+            if (c && !candidateIds.has(c.activityId)) {
+              candidates.push(c);
+              candidateIds.add(c.activityId);
+            }
+          }
           continue;
         }
       }
@@ -285,6 +361,28 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
       if (opts.dryRun) {
         stat.skipped++;
         summary.skipped++;
+        // 预览：还没进本地库的活动也算进上传候选，
+        // 否则「预览」会低估「会传多少条到目标平台」。
+        // 预览阶段不下载，用列表里的时间/距离做判重即可。
+        if (task.targetPlatforms.length > 0) {
+          const key = 'remote:' + platformId + ':' + remote.remoteId;
+          if (!candidateIds.has(key)) {
+            candidates.push({
+              activityId: key,
+              sourcePlatform: platformId,
+              sourceActivityId: remote.remoteId,
+              kind: 'fit',
+              blobKey: '',
+              name: remote.name ?? adapter.manifest.displayName,
+              startTime: remote.startTime,
+              sportType: remote.sportType ?? 'other',
+              timezoneOffsetMin: remote.timezoneOffset,
+              distanceMeters: remote.distanceMeters ?? 0,
+              syncedTargets: [],
+            });
+            candidateIds.add(key);
+          }
+        }
         continue;
       }
 
@@ -350,16 +448,22 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
 
         stat.downloaded++;
         summary.downloaded++;
-        processed.push({
-          activityId: id,
-          sourcePlatform: platformId,
-          kind: payload.sourceKind,
-          blobKey: stored.blobKey,
-          name: normalized.name,
-          startTime: normalized.startTime,
-          sportType: normalized.sportType,
-          timezoneOffsetMin: normalized.timezoneOffsetMin,
-        });
+        if (!candidateIds.has(id)) {
+          candidates.push({
+            activityId: id,
+            sourcePlatform: platformId,
+            sourceActivityId: remote.remoteId,
+            kind: payload.sourceKind,
+            blobKey: stored.blobKey,
+            name: normalized.name,
+            startTime: normalized.startTime,
+            sportType: normalized.sportType,
+            timezoneOffsetMin: normalized.timezoneOffsetMin,
+            distanceMeters: normalized.distanceMeters,
+            syncedTargets: [],
+          });
+          candidateIds.add(id);
+        }
 
         opts.onProgress?.({
           phase: 'download',
@@ -408,6 +512,33 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
     }
   }
 
+  // ★ 把「本地库已有、但本轮没有重新下载」的活动也纳入上传候选。
+  //
+  //   这是「同时上传到目标平台」能真正跑起来的关键：
+  //   候选集 = 本地库中「来源平台 ∈ 本次选择」的活动（受过滤器约束）
+  //   否则本地库里已有的活动永远进不了上传阶段。
+  if (task.targetPlatforms.length > 0) {
+    for (const platformId of task.sourcePlatforms) {
+      const local = await deps.store.list(userId, {
+        userId,
+        sourcePlatform: [platformId],
+        limit: Math.max(policy.maxItemsPerRun * 4, 200),
+        offset: 0,
+        sort: 'start_time',
+        order: 'desc',
+      });
+      for (const a of local.items) {
+        if (candidateIds.has(a.id)) continue;
+        if (!passFilters(a, task.filters)) continue;
+        const c = await candidateFromStored(deps.store, a);
+        if (c) {
+          candidates.push(c);
+          candidateIds.add(c.activityId);
+        }
+      }
+    }
+  }
+
   // ⑦ 上传阶段
   for (const targetId of task.targetPlatforms) {
     const adapter = deps.adapters.get(targetId);
@@ -426,8 +557,100 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
       continue;
     }
 
-    for (const item of processed) {
-      const external = externalIdFor(item);
+    // ★ 目标平台现有活动：用于判重。每个目标只拉一次。
+    //   拉不到就把判重关掉继续上传（宁可重复，也不要漏传）。
+    let targetRemotes: RemoteActivity[] = [];
+    if (!policy.forceResync) {
+      try {
+        const page = await withAuthRetry(
+          adapter,
+          targetCred,
+          () =>
+            adapter.listActivities(targetCred, {
+              limit: TARGET_EXISTENCE_LIMIT,
+            }),
+          deps,
+          targetId,
+          userId,
+          transientBudget,
+          retryDelays,
+        );
+        targetRemotes = page.items;
+      } catch (err) {
+        const e = normalizeError(err, targetId);
+        summary.errors.push(
+          targetId + ': 读取目标平台活动列表失败，无法判重：' + e.message,
+        );
+        await deps.events.emit(userId, {
+          level: 'warn',
+          category: 'platform',
+          platformId: targetId,
+          runId,
+          message: '无法读取目标平台活动列表，本次上传不做重复检查：' + e.message,
+          data: { code: e.code },
+        });
+      }
+    }
+
+    const st = summary.perPlatform[targetId] ??
+      (summary.perPlatform[targetId] = {
+        discovered: 0, downloaded: 0, skipped: 0, failed: 0,
+        uploaded: 0, uploadSkipped: 0, uploadPlanned: 0,
+        uploadDeferred: 0, uploadFailed: 0,
+      });
+
+    // ── 上传判重（两层）────────────────────────────────────
+    //   ① 本地记录：这条活动已经同步到过该目标 → 跳过
+    //   ② 目标平台列表：软匹配到同一条（时间 + 距离）→ 跳过
+    //
+    // ★ 判重依据是「目标平台有没有」，与本地库存不存在无关。
+    //   这正是把下载去重和上传去重分开的关键。
+    const pending: UploadCandidate[] = [];
+    for (const item of candidates) {
+      if (!policy.forceResync) {
+        if (item.syncedTargets.includes(targetId)) {
+          st.uploadSkipped++;
+          summary.uploadSkipped++;
+          continue;
+        }
+        const dup = targetRemotes.find((r) => isSameActivity(item, r));
+        if (dup) {
+          st.uploadSkipped++;
+          summary.uploadSkipped++;
+          await deps.events.emit(userId, {
+            level: 'info',
+            category: 'sync',
+            platformId: targetId,
+            activityId: item.activityId,
+            runId,
+            message: '跳过（目标平台已有相同活动）：' + item.name,
+            data: { targetRemoteId: dup.remoteId },
+          });
+          continue;
+        }
+      }
+      pending.push(item);
+    }
+
+    // 条数上限：**在判重之后**才截断。
+    //   否则「已被目标判定为重复」和「已同步过」的老活动会一直占着名额，
+    //   真正没传过的新活动反而永远轮不到（每轮都在同一批里打转）。
+    //   判重在前 → 每轮都会往前推进一批。
+    pending.sort((a, b) => (b.startTime ?? '').localeCompare(a.startTime ?? ''));
+    const batch = pending.slice(0, Math.max(policy.maxItemsPerRun, 0));
+    const deferred = pending.length - batch.length;
+    if (deferred > 0) {
+      st.uploadDeferred += deferred;
+      summary.uploadDeferred += deferred;
+    }
+    st.uploadPlanned += batch.length;
+    summary.uploadPlanned += batch.length;
+
+    for (const item of batch) {
+      const external = externalIdFor({
+        sourcePlatform: item.sourcePlatform,
+        activityId: item.sourceActivityId,
+      });
 
       if (opts.dryRun) continue;
 
@@ -453,7 +676,15 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
           () =>
             adapter.uploadFile!(
               targetCred,
-              { content, kind: item.kind, filename: fileName(item) },
+              {
+                content,
+                kind: item.kind,
+                filename: fileName({
+                  name: item.name,
+                  kind: item.kind,
+                  activityId: item.sourceActivityId,
+                }),
+              },
               {
                 name: item.name,
                 startTime: item.startTime,
@@ -481,10 +712,6 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
           result.remoteId,
           runId,
         );
-        const st = summary.perPlatform[targetId] ??
-          (summary.perPlatform[targetId] = {
-            discovered: 0, downloaded: 0, skipped: 0, failed: 0, uploaded: 0, uploadFailed: 0,
-          });
         st.uploaded++;
         summary.uploaded++;
 
@@ -498,10 +725,6 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
         });
       } catch (err) {
         const e = normalizeError(err, targetId);
-        const st = summary.perPlatform[targetId] ??
-          (summary.perPlatform[targetId] = {
-            discovered: 0, downloaded: 0, skipped: 0, failed: 0, uploaded: 0, uploadFailed: 0,
-          });
         st.uploadFailed++;
         summary.uploadFailed++;
         summary.errors.push(targetId + '/' + item.activityId + ': ' + e.message);
@@ -537,6 +760,9 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncRunSummary> {
       skipped: summary.skipped,
       failed: summary.failed,
       uploaded: summary.uploaded,
+      uploadSkipped: summary.uploadSkipped,
+      uploadPlanned: summary.uploadPlanned,
+      uploadDeferred: summary.uploadDeferred,
       uploadFailed: summary.uploadFailed,
     },
     error: summary.errors.length ? summary.errors.join('; ') : undefined,
@@ -589,6 +815,71 @@ function passFilters(
   }
   return true;
 }
+
+/**
+ * 把本地库里的一条活动转成上传候选。
+ *
+ * 找不到可用文件（比如文件已过期被清理）时返回 undefined —— 那样这条活动
+ * 就没法上传了，但**不应该**让它把整轮同步带崩。
+ */
+async function candidateFromStored(
+  store: ActivityStore,
+  a: StoredActivity,
+): Promise<UploadCandidate | undefined> {
+  const files = await store.listFiles(a.id);
+  const alive = files.filter((f) => !f.expired);
+  const f = alive.find((x) => !x.derived) ?? alive[0];
+  if (!f) return undefined;
+  return {
+    activityId: a.id,
+    sourcePlatform: a.source.platformId,
+    sourceActivityId: a.source.activityId,
+    kind: f.kind === 'converted-fit' ? 'fit' : f.kind,
+    blobKey: f.blobKey,
+    name: a.name,
+    startTime: a.startTime,
+    sportType: a.sportType,
+    timezoneOffsetMin: a.timezoneOffsetMin,
+    distanceMeters: a.distanceMeters,
+    syncedTargets: a.syncedTargets ?? [],
+  };
+}
+
+/**
+ * 判断「目标平台上这条」是不是就是「本地库这条」。
+ *
+ * 软匹配：开始时间 + 距离。
+ *   - 时间容差 10 分钟：平台入库时间可能有几十秒到几分钟的偏差
+ *   - 距离容差 max(2%, 100m)：两边距离精度不一样
+ *
+ * ★ 缺时间 → 一律判为「不是同一条」（宁可重复上传，也不要漏传）。
+ *   重复上传目标平台一般能接受（用户可删），漏传则数据永远少一条。
+ */
+export function isSameActivity(
+  a: { startTime?: string; distanceMeters?: number },
+  b: { startTime?: string; distanceMeters?: number },
+): boolean {
+  if (!a.startTime || !b.startTime) return false;
+  const ta = Date.parse(a.startTime);
+  const tb = Date.parse(b.startTime);
+  if (!Number.isFinite(ta) || !Number.isFinite(tb)) return false;
+  if (Math.abs(ta - tb) > MATCH_TIME_TOLERANCE_MS) return false;
+
+  if (a.distanceMeters && b.distanceMeters) {
+    const tol = Math.max(a.distanceMeters * 0.02, MATCH_DISTANCE_TOLERANCE_M);
+    if (Math.abs(a.distanceMeters - b.distanceMeters) > tol) return false;
+  }
+  return true;
+}
+
+/** 判重时拉取目标平台多少条活动 */
+const TARGET_EXISTENCE_LIMIT = 200;
+
+/** 判重时间容差（毫秒） */
+const MATCH_TIME_TOLERANCE_MS = 10 * 60 * 1000;
+
+/** 判重距离容差（米） */
+const MATCH_DISTANCE_TOLERANCE_M = 100;
 
 function externalIdFor(item: {
   sourcePlatform: string;

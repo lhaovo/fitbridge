@@ -15,6 +15,7 @@ import {
   type SyncState,
   type UpsertActivityInput,
   type StoredActivity,
+  isSameActivity,
 } from '../src/index.js';
 
 /* ── 测试替身 ──────────────────────────────────────────── */
@@ -320,6 +321,183 @@ describe('同步引擎', () => {
     expect(calls.length).toBe(2);
     const a = [...store.activities.values()][0]!;
     expect(a.syncedTargets).toContain('dst');
+  });
+
+  /* ── 下载去重 与 上传去重 必须分开 ────────────────────── */
+
+  it('本地库已有 + 上传模式 → 仍然上传（核心回归：以前会被判重复直接跳过）', async () => {
+    const src = makeSource();
+    const { adapter: dst, calls } = makeTarget(['fit']);
+
+    // 第一轮：只同步到本地库
+    await runSync({
+      task: { sourcePlatforms: ['src'], targetPlatforms: [], filters: {}, policy: DEFAULT_SYNC_POLICY },
+      userId: 'default',
+      deps: deps([src]),
+    });
+    expect(store.activities.size).toBe(2);
+
+    // 第二轮：来源不变，改成「同时上传到目标平台」
+    const r = await runSync({
+      task: { sourcePlatforms: ['src'], targetPlatforms: ['dst'], filters: {}, policy: DEFAULT_SYNC_POLICY },
+      userId: 'default',
+      deps: deps([src, dst]),
+    });
+
+    // 下载被跳过（本地已有），但上传必须照常发生
+    expect(r.downloaded).toBe(0);
+    expect(r.skipped).toBe(2);
+    expect(r.uploaded).toBe(2);
+    expect(calls.length).toBe(2);
+  });
+
+  it('已同步到该目标的活动 → 上传阶段跳过（不重复上传）', async () => {
+    const src = makeSource();
+    const { adapter: dst, calls } = makeTarget(['fit']);
+    const task = { sourcePlatforms: ['src'], targetPlatforms: ['dst'], filters: {}, policy: DEFAULT_SYNC_POLICY };
+
+    await runSync({ task, userId: 'default', deps: deps([src, dst]) });
+    expect(calls.length).toBe(2);
+
+    const r2 = await runSync({ task, userId: 'default', deps: deps([src, dst]) });
+    expect(r2.uploaded).toBe(0);
+    expect(r2.uploadSkipped).toBe(2);
+    expect(calls.length).toBe(2); // 没有新增上传调用
+  });
+
+  it('目标平台已有相同活动（时间+距离匹配）→ 上传阶段跳过', async () => {
+    // 源：两条活动，FIT 的开始时间不同
+    const src = makeSource({
+      async listActivities() {
+        return {
+          items: [
+            { remoteId: 'r1', name: 'A', startTime: '2026-03-01T02:00:00.000Z', distanceMeters: 100, sportType: 'cycling' },
+            { remoteId: 'r2', name: 'B', startTime: '2026-03-02T02:00:00.000Z', distanceMeters: 100, sportType: 'cycling' },
+          ],
+          hasMore: false,
+        };
+      },
+      async downloadFile(_c: Credential, activity: { remoteId: string }) {
+        return {
+          content: buildSyntheticFit({
+            start: new Date(activity.remoteId === 'r1' ? '2026-03-01T02:00:00.000Z' : '2026-03-02T02:00:00.000Z'),
+            recordCount: 20,
+          }),
+          contentType: 'application/octet-stream',
+          filename: 'a.fit',
+          sourceKind: 'fit' as const,
+          coordinateSystem: 'wgs84' as const,
+        };
+      },
+    } as Partial<PlatformAdapter>);
+
+    // 目标：已经有 r1 那条（时间相同、距离相同）
+    const { adapter: dst, calls } = makeTarget(['fit']);
+    const dstWithList: PlatformAdapter = {
+      ...dst,
+      async listActivities() {
+        return {
+          items: [{ remoteId: 'already-1', name: 'A', startTime: '2026-03-01T02:00:00.000Z', distanceMeters: 100 }],
+          hasMore: false,
+        };
+      },
+    } as PlatformAdapter;
+
+    const r = await runSync({
+      task: { sourcePlatforms: ['src'], targetPlatforms: ['dst'], filters: {}, policy: DEFAULT_SYNC_POLICY },
+      userId: 'default',
+      deps: deps([src, dstWithList]),
+    });
+
+    expect(r.uploaded).toBe(1);      // 只有 r2 需要传
+    expect(r.uploadSkipped).toBe(1); // r1 目标平台已有
+    expect(calls.length).toBe(1);
+  });
+
+  it('forceResync → 绕过上传判重（强制重传）', async () => {
+    const src = makeSource();
+    const { adapter: dst, calls } = makeTarget(['fit']);
+    const task = {
+      sourcePlatforms: ['src'],
+      targetPlatforms: ['dst'],
+      filters: {},
+      policy: { ...DEFAULT_SYNC_POLICY, forceResync: true },
+    };
+    await runSync({ task, userId: 'default', deps: deps([src, dst]) });
+    const before = calls.length;
+    await runSync({ task, userId: 'default', deps: deps([src, dst]) });
+    expect(calls.length).toBe(before + 2);
+  });
+
+  it('dryRun 预览上传条数，但不真的上传', async () => {
+    const src = makeSource();
+    const { adapter: dst, calls } = makeTarget(['fit']);
+    const r = await runSync({
+      task: { sourcePlatforms: ['src'], targetPlatforms: ['dst'], filters: {}, policy: DEFAULT_SYNC_POLICY },
+      userId: 'default',
+      deps: deps([src, dst]),
+      dryRun: true,
+    });
+    // 源有 2 条 → 预览会传 2 条，但一次都不该真传
+    expect(r.uploadPlanned).toBe(2);
+    expect(r.uploaded).toBe(0);
+    expect(calls.length).toBe(0);
+  });
+
+  it('dryRun 预览：本地库已有的活动也计入上传计划', async () => {
+    const src = makeSource();
+    const { adapter: dst, calls } = makeTarget(['fit']);
+    await runSync({
+      task: { sourcePlatforms: ['src'], targetPlatforms: [], filters: {}, policy: DEFAULT_SYNC_POLICY },
+      userId: 'default',
+      deps: deps([src]),
+    });
+    const r = await runSync({
+      task: { sourcePlatforms: ['src'], targetPlatforms: ['dst'], filters: {}, policy: DEFAULT_SYNC_POLICY },
+      userId: 'default',
+      deps: deps([src, dst]),
+      dryRun: true,
+    });
+    expect(r.uploadPlanned).toBe(2);
+    expect(calls.length).toBe(0);
+  });
+
+  it('条数上限在判重之后截断 → 多轮能逐步传完（不会卡在同一批）', async () => {
+    const src = makeSource();
+    const { adapter: dst, calls } = makeTarget(['fit']);
+    const task = {
+      sourcePlatforms: ['src'],
+      targetPlatforms: ['dst'],
+      filters: {},
+      policy: { ...DEFAULT_SYNC_POLICY, maxItemsPerRun: 1 },
+    };
+
+    const r1 = await runSync({ task, userId: 'default', deps: deps([src, dst]) });
+    expect(r1.uploaded).toBe(1);
+    expect(r1.uploadDeferred).toBe(1); // 另一条这轮没轮到
+
+    const r2 = await runSync({ task, userId: 'default', deps: deps([src, dst]) });
+    expect(r2.uploaded).toBe(1);      // 第二轮传到剩下那条
+    expect(r2.uploadDeferred).toBe(0);
+
+    const r3 = await runSync({ task, userId: 'default', deps: deps([src, dst]) });
+    expect(r3.uploaded).toBe(0);      // 都传完了
+    expect(r3.uploadSkipped).toBe(2);
+    expect(calls.length).toBe(2);
+  });
+
+  it('isSameActivity：时间+距离才算同一条，缺时间不算', () => {
+    const base = { startTime: '2026-03-01T02:00:00.000Z', distanceMeters: 1000 };
+    expect(isSameActivity(base, { startTime: '2026-03-01T02:00:00.000Z', distanceMeters: 1000 })).toBe(true);
+    // 差 5 分钟内 + 距离接近 → 算同一条
+    expect(isSameActivity(base, { startTime: '2026-03-01T02:05:00.000Z', distanceMeters: 1010 })).toBe(true);
+    // 差 30 分钟 → 不是
+    expect(isSameActivity(base, { startTime: '2026-03-01T02:30:00.000Z', distanceMeters: 1000 })).toBe(false);
+    // 时间一样但距离差很多 → 不是
+    expect(isSameActivity(base, { startTime: '2026-03-01T02:00:00.000Z', distanceMeters: 30000 })).toBe(false);
+    // 缺时间 → 宁可判为「不是」（避免漏传）
+    expect(isSameActivity(base, { distanceMeters: 1000 })).toBe(false);
+    expect(isSameActivity({ distanceMeters: 1000 }, base)).toBe(false);
   });
 
   it('目标只接受 FIT 而源是 GPX → 明确报错（需 M1 转换）', async () => {
